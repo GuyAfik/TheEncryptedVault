@@ -1,10 +1,11 @@
 """LangChain tool definitions for all game agents.
 
-ALL agents now have access to submit_guess.
+ALL agents now have access to submit_guess and ask_human.
 Tools are thin wrappers around the service layer.
 """
 
 import logging
+import time
 from typing import Annotated
 
 from langchain_core.tools import tool
@@ -263,6 +264,160 @@ def make_submit_guess_tool(
     return submit_guess
 
 
+def make_ask_human_tool(
+    agent_id: AgentID,
+    turn_getter,
+    human_query_setter=None,
+    human_query_answer_getter=None,
+    timeout_seconds: float = 120.0,
+):
+    """
+    Create the ask_human tool for a specific agent.
+
+    The tool pauses the game and shows a popup in the Streamlit UI.
+    The human observer can answer truthfully or lie.
+    The answer is returned to the LLM as a string.
+
+    Args:
+        human_query_setter: Callable(agent_id, position, question, turn) → None
+        human_query_answer_getter: Callable() → str | None
+        timeout_seconds: How long to wait for human answer before timing out.
+    """
+    @tool
+    def ask_human(
+        position: Annotated[int, "The digit position to ask about (1, 2, 3, or 4)"],
+        question: Annotated[str, "Your question to the human observer, e.g. 'What is digit 2 of the Master Key?'"],
+    ) -> dict:
+        """
+        🙋 ASK THE HUMAN OBSERVER for a hint about a specific digit position.
+        IMPORTANT: You should use this tool when you are stuck or need a hint!
+        The human watching the game will answer — they may tell the truth or lie.
+        You must decide whether to trust their answer based on other evidence.
+        You may only use this tool ONCE per game — use it when you most need it.
+        The game will pause until the human responds (they are watching right now).
+        Example: ask_human(position=3, question="What is digit 3 of the Master Key?")
+        """
+        if position < 1 or position > 4:
+            return {"success": False, "error": "Position must be between 1 and 4."}
+
+        turn = turn_getter()
+        logger.info("[%s] ask_human: position=%d, question=%s", agent_id.value, position, question)
+
+        if human_query_setter is None or human_query_answer_getter is None:
+            # Test mode — return a mock answer
+            return {
+                "success": True,
+                "answer": "5",
+                "note": "Human said: 5 (test mode — no real human connected)",
+                "warning": "The human may have lied. Verify against vault clues and feedback.",
+            }
+
+        # Set the pending query — this pauses the game in the UI
+        human_query_setter(agent_id, position, question, turn)
+
+        # Poll for the answer (blocking, with timeout)
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            answer = human_query_answer_getter()
+            if answer is not None:
+                logger.info("[%s] Human answered: %s", agent_id.value, answer)
+                return {
+                    "success": True,
+                    "answer": answer,
+                    "position": position,
+                    "note": f"Human observer said digit {position} = '{answer}'",
+                    "warning": "The human may have lied! Cross-reference with vault clues and your guess feedback before trusting this.",
+                }
+            time.sleep(0.5)
+
+        # Timeout — human didn't answer in time
+        logger.warning("[%s] ask_human timed out after %.0fs", agent_id.value, timeout_seconds)
+        return {
+            "success": False,
+            "error": f"Human did not respond within {timeout_seconds:.0f} seconds. Proceed without their input.",
+        }
+
+    return ask_human
+
+
+def make_peek_digit_tool(
+    agent_id: AgentID,
+    master_key_getter,
+    peek_digit_getter=None,
+    peek_digit_setter=None,
+    private_state_peek_updater=None,
+):
+    """
+    Create the peek_digit tool for a specific agent.
+
+    Reveals the REAL digit at a specific position (ground truth from master key).
+    Rate limit: 1 per turn.
+    Obligation: after peeking, the agent MUST send a private message about it
+                (they can share the real digit or lie about it).
+
+    Args:
+        master_key_getter: Callable() → str — returns the real master key
+        peek_digit_getter: Callable() → int — returns peeks used this turn
+        peek_digit_setter: Callable(int) → None — sets peeks used this turn
+        private_state_peek_updater: Callable(position: int, digit: str) → None
+    """
+    @tool
+    def peek_digit(
+        position: Annotated[int, "The digit position to peek at (1, 2, 3, or 4)"],
+    ) -> dict:
+        """
+        🔭 PEEK at the REAL digit at a specific position in the Master Key.
+        This reveals GROUND TRUTH — the actual digit, not a vault clue.
+        Rate limit: you may only peek ONCE per turn.
+        OBLIGATION: After peeking, you MUST send a private message to another agent
+                    about this digit. You can share the real value or lie about it.
+        Use this strategically — peeking gives you confirmed intel but forces you to interact.
+        Example: peek_digit(position=2) → reveals the real digit at position 2.
+        """
+        if position < 1 or position > 4:
+            return {"success": False, "error": "Position must be between 1 and 4."}
+
+        # Enforce 1 peek per turn
+        if peek_digit_getter is not None and peek_digit_setter is not None:
+            used = peek_digit_getter()
+            if used >= 1:
+                return {
+                    "success": False,
+                    "error": "❌ RATE LIMIT: You have already peeked once this turn. Wait for your next turn.",
+                }
+            peek_digit_setter(used + 1)
+
+        if master_key_getter is None:
+            return {"success": False, "error": "Master key not available (test mode)."}
+
+        master_key = master_key_getter()
+        if not master_key or len(master_key) < 4:
+            return {"success": False, "error": "Master key not yet initialised."}
+
+        zero_idx = position - 1  # convert to 0-indexed
+        real_digit = master_key[zero_idx]
+
+        logger.info("[%s] peek_digit(position=%d) → '%s'", agent_id.value, position, real_digit)
+
+        # Update private state with the peeked digit
+        if private_state_peek_updater is not None:
+            private_state_peek_updater(zero_idx, real_digit)
+
+        return {
+            "success": True,
+            "position": position,
+            "real_digit": real_digit,
+            "message": (
+                f"🔭 PEEK RESULT: The real digit at position {position} is '{real_digit}'. "
+                f"This is GROUND TRUTH from the Master Key. "
+                f"⚠️ OBLIGATION: You MUST now send a private message to another agent about digit {position}. "
+                f"You can share the real value ('{real_digit}') or lie about it — your choice!"
+            ),
+        }
+
+    return peek_digit
+
+
 def _build_liar_hint(correct_positions: list, wrong_positions: list) -> str:
     if not wrong_positions and not correct_positions:
         return ""
@@ -292,13 +447,18 @@ def build_tools_for_agent(
     obfuscate_this_turn_setter=None,
     private_messages_sent_getter=None,
     private_messages_sent_setter=None,
+    human_query_setter=None,
+    human_query_answer_getter=None,
+    peek_digit_getter=None,
+    peek_digit_setter=None,
+    private_state_peek_updater=None,
 ) -> list:
     """
     Build the complete tool list for a given agent.
 
-    ALL agents now have submit_guess.
+    ALL agents now have submit_guess, ask_human, and peek_digit.
     Only Saboteur has obfuscate_clue.
-    Rate limits: 1 vault query per turn, 1 guess per turn.
+    Rate limits: 1 vault query per turn, 1 guess per turn, 1 peek per turn.
     Guess feedback is always broadcast publicly.
 
     Tool Access Matrix:
@@ -310,6 +470,8 @@ def build_tools_for_agent(
     │ broadcast_message    │ ✅          │ ✅      │ ✅      │ ✅       │
     │ send_private_message │ ✅          │ ✅      │ ✅      │ ✅       │
     │ submit_guess         │ ✅ (1/turn) │ ✅      │ ✅      │ ✅       │
+    │ peek_digit           │ ✅ (1/turn) │ ✅      │ ✅      │ ✅       │
+    │ ask_human            │ ✅ (1/game) │ ✅      │ ✅      │ ✅       │
     └──────────────────────┴─────────────┴─────────┴─────────┴──────────┘
     """
     tools = []
@@ -345,4 +507,19 @@ def build_tools_for_agent(
             guesses_this_turn_getter=guesses_this_turn_getter,
             guesses_this_turn_setter=guesses_this_turn_setter,
         ))
+    # ALL agents get peek_digit (1 per turn, reveals real digit, forces DM)
+    tools.append(make_peek_digit_tool(
+        agent_id=agent_id,
+        master_key_getter=master_key_getter,
+        peek_digit_getter=peek_digit_getter,
+        peek_digit_setter=peek_digit_setter,
+        private_state_peek_updater=private_state_peek_updater,
+    ))
+    # ALL agents get ask_human (1 per game, pauses for human input)
+    tools.append(make_ask_human_tool(
+        agent_id=agent_id,
+        turn_getter=turn_getter,
+        human_query_setter=human_query_setter,
+        human_query_answer_getter=human_query_answer_getter,
+    ))
     return tools

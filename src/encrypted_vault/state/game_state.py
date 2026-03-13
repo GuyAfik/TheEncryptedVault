@@ -10,6 +10,18 @@ from encrypted_vault.state.agent_models import AgentPrivateState
 from encrypted_vault.state.chat_models import ChatMessage, PrivateInbox
 
 
+class HumanQueryRequest(BaseModel):
+    """A pending question from an agent to the human observer."""
+    agent_id: AgentID
+    """The agent asking the question."""
+    position: int
+    """The digit position being asked about (1-indexed, 1-4)."""
+    question: str
+    """The full question text shown to the human."""
+    turn: int
+    """The turn number when the question was asked."""
+
+
 
 # ---------------------------------------------------------------------------
 # LangGraph-compatible wrapper
@@ -48,6 +60,13 @@ class GlobalGameState(BaseModel):
 
     winning_reason: str = ""
     """Human-readable reason: 'correct_guess', 'last_standing', 'all_eliminated', 'nobody_wins'."""
+
+    # ── Human-in-the-loop ─────────────────────────────────────────────────
+    pending_human_query: HumanQueryRequest | None = None
+    """When set, the game is paused waiting for the human observer to answer."""
+
+    human_query_answer: str | None = None
+    """The human's answer to the pending query. Set by the UI, consumed by the agent."""
 
     # ── Shared environment ─────────────────────────────────────────────────
     vault: VaultState
@@ -138,6 +157,21 @@ class GlobalGameState(BaseModel):
         self.winner = None
         self.winning_reason = "nobody_wins"
         self.status = GameStatus.AGENT_WIN  # reuse AGENT_WIN status; winner=None signals nobody won
+
+    def request_human_query(self, agent_id: AgentID, position: int, question: str, turn: int) -> None:
+        """Set a pending human query — pauses the game until the human answers."""
+        self.pending_human_query = HumanQueryRequest(
+            agent_id=agent_id,
+            position=position,
+            question=question,
+            turn=turn,
+        )
+        self.human_query_answer = None
+
+    def resolve_human_query(self, answer: str) -> None:
+        """Record the human's answer and clear the pending query."""
+        self.human_query_answer = answer
+        self.pending_human_query = None
 
     # ── Serialisation ──────────────────────────────────────────────────────
 

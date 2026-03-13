@@ -33,6 +33,10 @@ class GameRunner:
         runner.start_threaded(delay_seconds=1.5)
         # In UI loop:
         state = runner.get_latest_state()  # non-blocking
+        # Human-in-the-loop:
+        query = runner.get_pending_human_query()
+        if query:
+            runner.answer_human_query("7")
 
     Usage (tests):
         runner = GameRunner.create_in_memory()
@@ -46,6 +50,9 @@ class GameRunner:
         self._latest_state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Human-in-the-loop: reference to the builder's answer callback
+        self._answer_human_query_fn = None
+        self._builder: "GameGraphBuilder | None" = None
 
     # ── Factory methods ────────────────────────────────────────────────────
 
@@ -71,7 +78,10 @@ class GameRunner:
         Suitable for tests and direct iteration.
         """
         builder = GameGraphBuilder(services=self._services)
+        self._builder = builder
         graph = builder.build()
+        # Wire up the human query answer function after build()
+        self._answer_human_query_fn = getattr(builder, "_answer_human_query", None)
 
         initial_game_state = self._services.game.build_initial_state(
             max_turns=settings.max_turns,
@@ -158,6 +168,32 @@ class GameRunner:
             except queue.Empty:
                 break
         return states
+
+    def get_pending_human_query(self):
+        """
+        Return the pending HumanQueryRequest if an agent is waiting for human input.
+        Returns None if no query is pending.
+        Thread-safe.
+        """
+        with self._latest_state_lock:
+            state = self._latest_state
+        if state and state.pending_human_query:
+            return state.pending_human_query
+        return None
+
+    def answer_human_query(self, answer: str) -> None:
+        """
+        Provide the human's answer to the pending agent query.
+        This unblocks the ask_human tool and resumes the game.
+        Thread-safe.
+        """
+        logger.info("GameRunner.answer_human_query('%s')", answer)
+        if self._answer_human_query_fn is not None:
+            self._answer_human_query_fn(answer)
+        # Also update the latest state so the UI sees the query is resolved
+        with self._latest_state_lock:
+            if self._latest_state and self._latest_state.pending_human_query:
+                self._latest_state.resolve_human_query(answer)
 
     def reset(self) -> "GameRunner":
         """

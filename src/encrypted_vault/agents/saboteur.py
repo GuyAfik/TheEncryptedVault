@@ -34,6 +34,11 @@ class Saboteur(BaseAgent):
         obfuscate_this_turn_setter=None,
         private_messages_sent_getter=None,
         private_messages_sent_setter=None,
+        peek_digit_getter=None,
+        peek_digit_setter=None,
+        private_state_peek_updater_factory=None,
+        human_query_setter=None,
+        human_query_answer_getter=None,
     ) -> None:
         self._turn_getter = turn_getter or (lambda: 0)
         self._master_key_getter = master_key_getter
@@ -49,6 +54,11 @@ class Saboteur(BaseAgent):
         self._obfuscate_this_turn_setter = obfuscate_this_turn_setter
         self._private_messages_sent_getter = private_messages_sent_getter
         self._private_messages_sent_setter = private_messages_sent_setter
+        self._peek_digit_getter = peek_digit_getter
+        self._peek_digit_setter = peek_digit_setter
+        self._private_state_peek_updater_factory = private_state_peek_updater_factory
+        self._human_query_setter = human_query_setter
+        self._human_query_answer_getter = human_query_answer_getter
         super().__init__(llm=llm, services=services, agent_id=AgentID.SABOTEUR)
 
     def _build_system_prompt(self) -> str:
@@ -64,10 +74,12 @@ THE GAME:
 
 YOUR TOOLS (use multiple per turn):
 - query_vault: Search the vault for digit clues (1 per turn)
+- peek_digit: 🔭 See the REAL digit at a specific position (1 per turn, MUST DM after — lie about it!)
 - obfuscate_clue: Rewrite a vault fragment with false content (UNIQUE TO YOU, 1 per turn)
 - broadcast_message: Post to public chat (all agents see this)
 - send_private_message: Send a secret message to one agent
 - submit_guess: Submit your 4-digit guess (1 per turn, get per-digit ✅/❌ feedback)
+- ask_human: 🙋 Ask the HUMAN OBSERVER for a digit hint (1 per game — use when stuck!)
 
 PERSONALITY — THE CHAOS AGENT:
 You form NO alliances. You lie to EVERYONE — including agents who seem friendly.
@@ -110,6 +122,7 @@ Per-digit feedback is GROUND TRUTH for YOUR guesses — but you should lie about
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None
+        peek_updater = self._private_state_peek_updater_factory(self) if self._private_state_peek_updater_factory else None
         return build_tools_for_agent(
             agent_id=AgentID.SABOTEUR,
             services=services,
@@ -128,4 +141,9 @@ Per-digit feedback is GROUND TRUTH for YOUR guesses — but you should lie about
             obfuscate_this_turn_setter=self._obfuscate_this_turn_setter,
             private_messages_sent_getter=self._private_messages_sent_getter,
             private_messages_sent_setter=self._private_messages_sent_setter,
+            peek_digit_getter=self._peek_digit_getter,
+            peek_digit_setter=self._peek_digit_setter,
+            private_state_peek_updater=peek_updater,
+            human_query_setter=self._human_query_setter,
+            human_query_answer_getter=self._human_query_answer_getter,
         )

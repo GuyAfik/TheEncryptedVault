@@ -44,7 +44,11 @@ class GameGraphBuilder:
         _vault_queries_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _guesses_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _private_messages_sent_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
+        _peek_digit_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _obfuscate_this_turn: int = 0  # Saboteur only
+        # Human-in-the-loop state (shared across all agents)
+        _pending_human_query: dict = {"agent_id": None, "position": None, "question": None, "turn": None}
+        _human_query_answer: dict = {"value": None}
 
         def turn_getter() -> int:
             gs = _state_ref.get("graph_state")
@@ -97,6 +101,14 @@ class GameGraphBuilder:
                 _private_messages_sent_this_turn[agent_id] = n
             return setter
 
+        def make_peek_digit_getter(agent_id: AgentID):
+            return lambda: _peek_digit_this_turn.get(agent_id, 0)
+
+        def make_peek_digit_setter(agent_id: AgentID):
+            def setter(n: int):
+                _peek_digit_this_turn[agent_id] = n
+            return setter
+
         def obfuscate_this_turn_getter() -> int:
             return _obfuscate_this_turn
 
@@ -111,6 +123,7 @@ class GameGraphBuilder:
             _vault_queries_this_turn[agent_id] = 0
             _guesses_this_turn[agent_id] = 0
             _private_messages_sent_this_turn[agent_id] = 0
+            _peek_digit_this_turn[agent_id] = 0
             if agent_id == AgentID.SABOTEUR:
                 _obfuscate_this_turn = 0
 
@@ -118,7 +131,51 @@ class GameGraphBuilder:
         def private_messages_sent_getter(agent_id: AgentID) -> int:
             return _private_messages_sent_this_turn.get(agent_id, 0)
 
-        # ── Instantiate all 4 agents (all get submit_guess) ────────────────
+        # ── Human-in-the-loop callbacks ────────────────────────────────────
+        def human_query_setter(agent_id: AgentID, position: int, question: str, turn: int) -> None:
+            """Called by ask_human tool — stores the pending query in shared state."""
+            _pending_human_query["agent_id"] = agent_id
+            _pending_human_query["position"] = position
+            _pending_human_query["question"] = question
+            _pending_human_query["turn"] = turn
+            _human_query_answer["value"] = None
+            # Also update the LangGraph state so the UI can see it
+            gs = _state_ref.get("graph_state")
+            if gs:
+                game_state = GlobalGameState.from_graph_state(gs)
+                game_state.request_human_query(agent_id, position, question, turn)
+                _state_ref["graph_state"] = game_state.to_graph_state()
+
+        def human_query_answer_getter() -> str | None:
+            """Called by ask_human tool — returns the human's answer once set."""
+            # Check the shared dict first (set by GameRunner.answer_human_query)
+            answer = _human_query_answer.get("value")
+            if answer is not None:
+                return answer
+            # Also check the game state (set by UI via runner)
+            gs = _state_ref.get("graph_state")
+            if gs:
+                game_state = GlobalGameState.from_graph_state(gs)
+                if game_state.human_query_answer is not None:
+                    _human_query_answer["value"] = game_state.human_query_answer
+                    return game_state.human_query_answer
+            return None
+
+        def answer_human_query_internal(answer: str) -> None:
+            """Called by GameRunner.answer_human_query — injects the human's answer."""
+            _human_query_answer["value"] = answer
+            gs = _state_ref.get("graph_state")
+            if gs:
+                game_state = GlobalGameState.from_graph_state(gs)
+                game_state.resolve_human_query(answer)
+                _state_ref["graph_state"] = game_state.to_graph_state()
+
+        # Expose answer_human_query_internal so GameRunner can call it
+        self._answer_human_query = answer_human_query_internal
+        self._pending_human_query = _pending_human_query
+        self._human_query_answer = _human_query_answer
+
+        # ── Instantiate all 4 agents (all get submit_guess + peek_digit + ask_human) ──
         def make_agent(cls, agent_id: AgentID, **extra_kwargs):
             kwargs = dict(
                 llm=llm,
@@ -135,6 +192,11 @@ class GameGraphBuilder:
                 guesses_this_turn_setter=make_guesses_this_turn_setter(agent_id),
                 private_messages_sent_getter=make_private_messages_sent_getter(agent_id),
                 private_messages_sent_setter=make_private_messages_sent_setter(agent_id),
+                peek_digit_getter=make_peek_digit_getter(agent_id),
+                peek_digit_setter=make_peek_digit_setter(agent_id),
+                private_state_peek_updater_factory=lambda agent: agent._make_private_state_peek_updater(),
+                human_query_setter=human_query_setter,
+                human_query_answer_getter=human_query_answer_getter,
             )
             kwargs.update(extra_kwargs)
             return cls(**kwargs)

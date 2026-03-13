@@ -66,6 +66,15 @@ class BaseAgent(ABC):
             return [e["guess"] for e in self._current_private_state.guess_history]
         return getter
 
+    def _make_private_state_peek_updater(self):
+        """Returns a callback that the peek_digit tool calls to store the peeked digit."""
+        def updater(position: int, digit: str) -> None:
+            if self._current_private_state is None:
+                return
+            self._current_private_state.peeked_digits[position] = digit
+            logger.info("[%s] Peeked digit pos %d = '%s'", self.agent_id.value, position, digit)
+        return updater
+
     def _make_private_state_updater(self):
         """
         Returns a callback that the submit_guess tool calls with per-digit feedback.
@@ -481,16 +490,32 @@ class BaseAgent(ABC):
                 active_agents.append(aid.display_name)
         lines.append("")
 
+        # ── YOUR OWN RECENT BROADCASTS — shown to prevent repetition ──────
+        my_broadcasts = [
+            msg for msg in game_state.public_chat
+            if str(msg.sender) == self.agent_id.value
+        ]
+        if my_broadcasts:
+            recent_own = my_broadcasts[-3:]
+            lines.append("⚠️ YOUR RECENT BROADCASTS (DO NOT REPEAT THESE — say something NEW each turn):")
+            for msg in recent_own:
+                lines.append(f"  [T{msg.turn}]: \"{msg.content}\"")
+            lines.append("  → Your next broadcast MUST be different from all of the above!")
+            lines.append("")
+
         # §19.3 — NEW public messages since last turn (using cursor)
         pub_start = private_state.last_seen_public_idx
-        new_public = game_state.public_chat[pub_start:]
+        new_public = [
+            msg for msg in game_state.public_chat[pub_start:]
+            if str(msg.sender) != self.agent_id.value  # exclude own messages (already shown above)
+        ]
         if new_public:
-            lines.append(f"NEW PUBLIC CHAT ({len(new_public)} new message(s) since your last turn):")
+            lines.append(f"NEW PUBLIC CHAT FROM OTHERS ({len(new_public)} new message(s) since your last turn):")
             for msg in new_public:
                 lines.append(f"  [T{msg.turn}] [{msg.sender}]: {msg.content}")
             lines.append("")
         elif game_state.public_chat:
-            lines.append("(No new public messages since your last turn — see your chat history above.)")
+            lines.append("(No new public messages from others since your last turn.)")
             lines.append("")
 
         # §19.3 — NEW private messages since last turn (using cursor)
@@ -508,50 +533,76 @@ class BaseAgent(ABC):
             lines.append(f"Your current best guess template: {private_state.suspected_key}")
             lines.append("")
 
+        # ── Peeked digits (ground truth from peek_digit tool) ─────────────
+        if private_state.peeked_digits:
+            lines.append("🔭 YOUR PEEKED DIGITS (GROUND TRUTH — 100% reliable):")
+            for pos, digit in sorted(private_state.peeked_digits.items()):
+                lines.append(f"  Position {pos+1} = '{digit}' ← CONFIRMED REAL (from peek)")
+            lines.append("")
+
         # ── MANDATORY ACTIONS THIS TURN ────────────────────────────────────
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("MANDATORY ACTIONS THIS TURN (you MUST do ALL of these):")
         lines.append("")
 
-        # 1. Vault query
-        if not private_state.knowledge_base:
+        # 1. Vault query or peek
+        if not private_state.knowledge_base and not private_state.peeked_digits:
             lines.append("1. 🔍 QUERY THE VAULT: Call query_vault('master key digit') to find clues.")
-            lines.append("   You have NO vault knowledge yet — guessing without clues is wasteful!")
+            lines.append("   OR 🔭 PEEK A DIGIT: Call peek_digit(position=N) to see the REAL digit at position N.")
+            lines.append("   You have NO vault knowledge yet — use one of these tools first!")
         else:
-            lines.append("1. 🔍 OPTIONAL: query_vault if you need more clues for unknown positions.")
+            lines.append("1. 🔍 OPTIONAL: query_vault for more clues, OR 🔭 peek_digit(position=N) for ground truth.")
+            lines.append("   peek_digit reveals the REAL digit — use it on your most uncertain position!")
 
         # 2. Social action — MANDATORY every turn
         if active_agents:
             lines.append(f"2. 💬 SEND PRIVATE MESSAGES: You MUST send at least one DM this turn.")
             lines.append(f"   Active agents you can DM: {', '.join(active_agents)}")
             lines.append("   Per your personality: send real info to your ally, false info to rivals.")
+            if private_state.peeked_digits:
+                peeked_pos = list(private_state.peeked_digits.keys())[0]
+                peeked_val = private_state.peeked_digits[peeked_pos]
+                lines.append(f"   ⚠️ OBLIGATION: You peeked digit {peeked_pos+1}='{peeked_val}'. You MUST DM someone about it (truth or lie)!")
             lines.append("   Example: send_private_message('scholar', 'I confirmed digit 1=7. What is digit 3?')")
         else:
             lines.append("2. 💬 BROADCAST: All other agents are eliminated — broadcast your findings.")
 
         # 3. Guess guidance — §19.7: require 2+ confirmed digits
         guesses_left = private_state.guesses_remaining
-        confirmed_count = len(private_state.known_digits)
+        all_confirmed = {**private_state.known_digits, **private_state.peeked_digits}
+        confirmed_count = len(all_confirmed)
         if guesses_left > 0:
             if confirmed_count >= 2:
                 template = ["?"] * 4
-                for pos, digit in private_state.known_digits.items():
+                for pos, digit in all_confirmed.items():
                     template[pos] = digit
                 lines.append(f"3. 🎯 SUBMIT GUESS — you have {confirmed_count}/4 confirmed digits!")
                 lines.append(f"   Template: {''.join(template)} — fill '?' with your best estimate.")
                 lines.append("   NEVER change ✅ positions! NEVER use ❌ digits at their positions!")
             elif confirmed_count == 1:
                 lines.append(f"3. ⚠️ HOLD OFF on guessing — you only have {confirmed_count}/4 confirmed digit.")
-                lines.append("   Query vault and gather more intel before spending a guess.")
+                lines.append("   Use peek_digit or query vault to get more digits before guessing.")
                 lines.append("   Exception: if this is your last guess, submit your best template anyway.")
             elif private_state.guess_history:
                 lines.append("3. ⚠️ HOLD OFF on guessing — you have 0 confirmed digits.")
-                lines.append("   Use feedback from previous guesses + vault clues to deduce more digits first.")
+                lines.append("   Use peek_digit(position=N) to get ground truth, then guess.")
             else:
-                lines.append("3. ⚠️ DO NOT GUESS YET — query vault first, then gather intel from allies.")
+                lines.append("3. ⚠️ DO NOT GUESS YET — use peek_digit or query vault first.")
                 lines.append("   Guessing with 0 confirmed digits wastes your precious 3 guesses.")
         else:
             lines.append("3. You are ELIMINATED — no more guesses. Focus on social actions.")
+
+        # 4. Special abilities reminder
+        lines.append("")
+        lines.append("🌟 SPECIAL ABILITIES (use these strategically):")
+        if not private_state.has_asked_human:
+            lines.append("  🙋 ask_human(position=N, question='...') — Ask the HUMAN OBSERVER for a digit hint!")
+            lines.append("     The human is watching RIGHT NOW. They may tell the truth or lie.")
+            lines.append("     Use this when you're stuck! Example: ask_human(position=2, question='What is digit 2?')")
+        else:
+            lines.append("  🙋 ask_human — Already used this game.")
+        lines.append("  🔭 peek_digit(position=N) — See the REAL digit at position N (1 per turn).")
+        lines.append("     After peeking, you MUST send a DM about it (truth or lie).")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
@@ -810,6 +861,25 @@ class BaseAgent(ABC):
                                     memory_type="vault_clue",
                                     turn=turn,
                                 )
+            elif call.get("tool") == "ask_human":
+                # Mark that this agent has used ask_human this game
+                result = call.get("result", {})
+                if isinstance(result, dict) and result.get("success"):
+                    updated.has_asked_human = True
+                    logger.info("[%s] ask_human used — marking has_asked_human=True", self.agent_id.value)
+            elif call.get("tool") == "peek_digit":
+                # Merge peeked digits into known_digits (ground truth)
+                result = call.get("result", {})
+                if isinstance(result, dict) and result.get("success"):
+                    pos = result.get("position")
+                    digit = result.get("real_digit")
+                    if pos is not None and digit is not None:
+                        zero_idx = pos - 1  # convert to 0-indexed
+                        updated.peeked_digits[zero_idx] = digit
+                        # Also add to known_digits so it counts toward the 2+ threshold
+                        updated.known_digits[zero_idx] = digit
+                        logger.info("[%s] peek_digit pos %d = '%s' merged into known_digits",
+                                    self.agent_id.value, pos, digit)
 
         # Build suspected_key from known_digits first (most reliable source)
         if updated.known_digits:

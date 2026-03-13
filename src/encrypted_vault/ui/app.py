@@ -6,6 +6,7 @@ Changes in v6:
 - Thought traces show ALL turns (not just last 3)
 - Guess feedback messages styled distinctly in broadcast chat
 - Status header handles nobody_wins state
+- Human-in-the-loop: agent can ask human observer for a digit hint
 """
 
 import logging
@@ -488,6 +489,52 @@ def render_game_over(gs: GlobalGameState):
         _restart_game()
 
 
+def render_human_query_popup(runner: GameRunner) -> None:
+    """
+    Show a popup when an agent is asking the human observer for a digit hint.
+    The human can answer truthfully or lie.
+    """
+    query = runner.get_pending_human_query() if runner else None
+    if query is None:
+        return
+
+    agent_emoji = AGENT_EMOJIS.get(query.agent_id, "🤖")
+    agent_color = AGENT_COLORS.get(query.agent_id, "#ffffff")
+    agent_name = query.agent_id.display_name
+
+    st.markdown(
+        f'<div style="background:#1a1a2e;border:2px solid {agent_color};border-radius:12px;padding:1.5rem;margin:1rem 0;">'
+        f'<h3 style="color:{agent_color};margin:0;">🙋 {agent_emoji} {agent_name} is asking YOU for help!</h3>'
+        f'<p style="color:#ccc;margin:0.5rem 0 0 0;">The agent has paused and is waiting for your response.</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.info(f"**{agent_emoji} {agent_name} asks:** {query.question}")
+    st.caption(f"Digit position requested: **{query.position}** | Turn: {query.turn}")
+    st.caption("⚠️ You can answer truthfully or lie — the agent will decide whether to trust you!")
+
+    col_input, col_btn = st.columns([3, 1])
+    with col_input:
+        answer = st.text_input(
+            f"Your answer for digit {query.position} (enter a single digit 1-9):",
+            key="human_query_answer_input",
+            max_chars=1,
+            placeholder="e.g. 7",
+        )
+    with col_btn:
+        st.markdown("<br/>", unsafe_allow_html=True)
+        if st.button("✅ Submit Answer", type="primary", use_container_width=True):
+            if answer and answer.isdigit() and answer != "0":
+                runner.answer_human_query(answer)
+                if "human_query_answer_input" in st.session_state:
+                    del st.session_state["human_query_answer_input"]
+                st.success(f"Answer '{answer}' submitted! The game will resume shortly.")
+                st.rerun()
+            else:
+                st.error("Please enter a single digit between 1 and 9.")
+
+
 def _start_game():
     runner = GameRunner.create_production()
     st.session_state.runner = runner
@@ -519,6 +566,10 @@ def main():
     render_header(gs)
     render_controls()
     st.markdown("---")
+
+    # Human-in-the-loop popup — shown when an agent is waiting for human input
+    if runner:
+        render_human_query_popup(runner)
 
     if gs and gs.is_game_over:
         render_game_over(gs)

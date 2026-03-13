@@ -52,6 +52,16 @@ class AgentPrivateState(BaseModel):
     private_messages_sent_this_turn: int = 0
     """Number of private messages sent this turn. Used to detect if auto-DM fallback is needed."""
 
+    peek_digit_this_turn: int = 0
+    """Number of peek_digit calls this turn. Max 1 per turn."""
+
+    # ── Per-game one-time abilities ────────────────────────────────────────
+    has_asked_human: bool = False
+    """True if this agent has already used ask_human this game (1 use per game)."""
+
+    peeked_digits: dict[int, str] = Field(default_factory=dict)
+    """Digits revealed by peek_digit: {0: '7'} means position 1 = '7' (confirmed real, 0-indexed)."""
+
     # ── Message history cursors (track what has already been shown to the LLM) ──
     last_seen_public_idx: int = 0
     """Index into game_state.public_chat — messages at index >= this are NEW this turn."""
