@@ -49,6 +49,16 @@ class AgentPrivateState(BaseModel):
     guesses_this_turn: int = 0
     """Number of guesses submitted this turn. Max 1 per turn."""
 
+    private_messages_sent_this_turn: int = 0
+    """Number of private messages sent this turn. Used to detect if auto-DM fallback is needed."""
+
+    # ── Message history cursors (track what has already been shown to the LLM) ──
+    last_seen_public_idx: int = 0
+    """Index into game_state.public_chat — messages at index >= this are NEW this turn."""
+
+    last_seen_private_idx: int = 0
+    """Index into inbox.messages — messages at index >= this are NEW this turn."""
+
     # ── Social intelligence ────────────────────────────────────────────────
 
     agent_trust: dict[str, str] = Field(default_factory=dict)

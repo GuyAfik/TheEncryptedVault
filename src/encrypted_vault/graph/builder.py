@@ -24,24 +24,26 @@ class GameGraphBuilder:
     """
     Constructs and compiles the LangGraph StateGraph.
 
-    All 4 agents now have submit_guess.
+    All 4 agents have submit_guess.
     Agents are eliminated after 3 wrong guesses.
-    Winner must have submitted at least 1 guess to win by closeness.
+    Guess feedback is always broadcast publicly.
+    Turn 20 with no correct guess → nobody wins.
     """
 
     def __init__(self, services: ServiceContainer) -> None:
         self._services = services
 
-    def build(self, broadcast_guess_results: bool = True):
+    def build(self):
         """Build and compile the LangGraph StateGraph."""
         llm = LLMFactory.create_default()
 
         # ── Shared mutable refs for tool callbacks ─────────────────────────
         _state_ref: dict = {"graph_state": None}
         _guesses: dict[AgentID, int] = {a: 3 for a in AgentID}
-        # Per-turn rate-limit counters (reset at the start of each agent's turn in agent_node)
+        # Per-turn rate-limit counters (reset at the start of each agent's turn)
         _vault_queries_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _guesses_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
+        _private_messages_sent_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _obfuscate_this_turn: int = 0  # Saboteur only
 
         def turn_getter() -> int:
@@ -87,6 +89,14 @@ class GameGraphBuilder:
                 _guesses_this_turn[agent_id] = n
             return setter
 
+        def make_private_messages_sent_getter(agent_id: AgentID):
+            return lambda: _private_messages_sent_this_turn.get(agent_id, 0)
+
+        def make_private_messages_sent_setter(agent_id: AgentID):
+            def setter(n: int):
+                _private_messages_sent_this_turn[agent_id] = n
+            return setter
+
         def obfuscate_this_turn_getter() -> int:
             return _obfuscate_this_turn
 
@@ -100,8 +110,13 @@ class GameGraphBuilder:
             nonlocal _obfuscate_this_turn
             _vault_queries_this_turn[agent_id] = 0
             _guesses_this_turn[agent_id] = 0
+            _private_messages_sent_this_turn[agent_id] = 0
             if agent_id == AgentID.SABOTEUR:
                 _obfuscate_this_turn = 0
+
+        # Shared getter for private_messages_sent (used by make_agent_node)
+        def private_messages_sent_getter(agent_id: AgentID) -> int:
+            return _private_messages_sent_this_turn.get(agent_id, 0)
 
         # ── Instantiate all 4 agents (all get submit_guess) ────────────────
         def make_agent(cls, agent_id: AgentID, **extra_kwargs):
@@ -118,6 +133,8 @@ class GameGraphBuilder:
                 vault_queries_setter=make_vault_queries_setter(agent_id),
                 guesses_this_turn_getter=make_guesses_this_turn_getter(agent_id),
                 guesses_this_turn_setter=make_guesses_this_turn_setter(agent_id),
+                private_messages_sent_getter=make_private_messages_sent_getter(agent_id),
+                private_messages_sent_setter=make_private_messages_sent_setter(agent_id),
             )
             kwargs.update(extra_kwargs)
             return cls(**kwargs)
@@ -147,7 +164,6 @@ class GameGraphBuilder:
             functools.partial(
                 initialize_node,
                 services=self._services,
-                broadcast_guess_results=broadcast_guess_results,
             ),
         )
 
@@ -157,7 +173,12 @@ class GameGraphBuilder:
             (AgentID.SCHOLAR,     scholar),
             (AgentID.ENFORCER,    enforcer),
         ]:
-            raw_node = make_agent_node(agent, self._services, reset_turn_counters)
+            raw_node = make_agent_node(
+                agent,
+                self._services,
+                reset_turn_counters,
+                private_messages_sent_getter,
+            )
             graph.add_node(
                 f"agent_{agent_id.value}",
                 wrap_with_state_sync(raw_node, agent_id),
@@ -201,7 +222,6 @@ class GameGraphBuilder:
             agent_id = game_state.turn_order[idx]
             private = game_state.agent_states.get(agent_id)
             if private and not private.is_eliminated:
-                # If we had to skip, update the index
                 if offset > 0:
                     game_state.current_agent_index = idx
                 return f"agent_{agent_id.value}"

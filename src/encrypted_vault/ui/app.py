@@ -1,12 +1,11 @@
 """The Encrypted Vault — Streamlit Dashboard (v6).
 
-Fixes:
-- Bug 1: guesses_remaining synced from nodes.py (not just _guesses dict)
-- Bug 2: thoughts accumulated from both LLM rounds
-- Bug 3: Speed slider removed
-- Bug 4: Eliminated agents shown clearly (greyed out, 💀 badge)
-- Bug 5: Game over shows winning guess + what guess would have won for closeness winner
-- Bug 6: Guess numbers shown (#1, #2, #3) per agent
+Changes in v6:
+- Removed broadcast_guess_results toggle (always broadcast now)
+- Turn 20 = nobody wins (render_game_over handles winner=None)
+- Thought traces show ALL turns (not just last 3)
+- Guess feedback messages styled distinctly in broadcast chat
+- Status header handles nobody_wins state
 """
 
 import logging
@@ -59,6 +58,7 @@ def inject_css():
     .active-banner { padding:0.5rem 1rem; border-radius:8px; font-size:1rem; font-weight:bold; text-align:center; margin-bottom:0.5rem; }
     .msg-broadcast { background:#1a2035; border-left:4px solid #4A90D9; padding:0.5rem 0.8rem; border-radius:0 8px 8px 0; margin:0.25rem 0; font-size:0.88rem; color:#e0e0e0; }
     .msg-system    { background:#0d2a1a; border-left:4px solid #2ECC71; padding:0.5rem 0.8rem; border-radius:0 8px 8px 0; margin:0.25rem 0; font-size:0.88rem; color:#a0ffa0; font-style:italic; }
+    .msg-guess     { background:#2a1a00; border-left:4px solid #F39C12; padding:0.5rem 0.8rem; border-radius:0 8px 8px 0; margin:0.25rem 0; font-size:0.88rem; color:#ffd080; font-weight:bold; }
     .msg-infiltrator { border-left-color:#4A90D9 !important; }
     .msg-saboteur    { border-left-color:#E74C3C !important; }
     .msg-scholar     { border-left-color:#2ECC71 !important; }
@@ -67,11 +67,13 @@ def inject_css():
     .agent-card { border-radius:10px; padding:0.8rem; margin:0.4rem 0; }
     .agent-eliminated { opacity:0.5; filter:grayscale(80%); }
     .thought-box { background:#0d1117; border-radius:6px; padding:0.5rem 0.8rem; font-size:0.82rem; color:#8b949e; font-style:italic; border-left:3px solid #30363d; margin:0.2rem 0; white-space:pre-wrap; word-wrap:break-word; }
+    .thought-tools { background:#0d1117; border-radius:6px; padding:0.3rem 0.6rem; font-size:0.78rem; color:#58a6ff; border-left:3px solid #1f6feb; margin:0.1rem 0; }
     .master-key-box { background:linear-gradient(135deg,#1a1a2e,#0f3460); border:2px solid #e94560; border-radius:10px; padding:0.6rem 1.2rem; text-align:center; font-size:1.8rem; font-weight:bold; letter-spacing:12px; color:#e94560; margin:0.5rem 0; }
     .frag-key       { background:#0d2a0d; color:#2ECC71; border:1px solid #2ECC71; border-radius:6px; padding:0.3rem 0.6rem; margin:0.2rem; display:inline-block; font-size:0.8rem; }
     .frag-corrupted { background:#2a0d0d; color:#E74C3C; border:1px solid #E74C3C; border-radius:6px; padding:0.3rem 0.6rem; margin:0.2rem; display:inline-block; font-size:0.8rem; }
     .frag-noise     { background:#1a1a1a; color:#888;    border:1px solid #444;    border-radius:6px; padding:0.3rem 0.6rem; margin:0.2rem; display:inline-block; font-size:0.8rem; }
     .winner-banner  { border-radius:12px; padding:2rem; text-align:center; margin:1rem 0; }
+    .nobody-banner  { border-radius:12px; padding:2rem; text-align:center; margin:1rem 0; background:linear-gradient(135deg,#1a1a1a,#2a2a2a); border:2px solid #666; }
     .guess-feedback { font-family:monospace; font-size:0.88rem; background:#1a2035; color:#e0e0e0; padding:0.3rem 0.6rem; border-radius:4px; margin:0.15rem 0; border-left:3px solid #4A90D9; }
     .guess-correct  { border-left-color:#2ECC71 !important; }
     .guess-wrong    { border-left-color:#E74C3C !important; }
@@ -84,7 +86,6 @@ def init_session_state():
         "runner": None,
         "game_state": None,
         "game_started": False,
-        "broadcast_guess_results": False,
     }.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -95,6 +96,7 @@ def render_header(gs: GlobalGameState | None):
     max_turns = gs.max_turns if gs else 20
     rag = gs.vault.rag_health if gs else 100
     status = gs.status if gs else GameStatus.RUNNING
+    winning_reason = gs.winning_reason if gs else ""
 
     st.markdown('<div class="vault-header"><p class="vault-title">🔐 THE ENCRYPTED VAULT</p></div>',
                 unsafe_allow_html=True)
@@ -106,22 +108,28 @@ def render_header(gs: GlobalGameState | None):
         icon = "🟢" if rag > 60 else "🟡" if rag > 30 else "🔴"
         st.metric("RAG Health", f"{icon} {rag}%")
     with c3:
-        st.metric("Status", {
-            GameStatus.RUNNING:   "⚔️ Running",
-            GameStatus.AGENT_WIN: "🏆 Agent Won!",
-        }.get(status, "—"))
+        if winning_reason == "nobody_wins":
+            status_label = "❌ Nobody Won"
+        else:
+            status_label = {
+                GameStatus.RUNNING:   "⚔️ Running",
+                GameStatus.AGENT_WIN: "🏆 Agent Won!",
+            }.get(status, "—")
+        st.metric("Status", status_label)
     with c4:
         winner = gs.winner if gs else None
-        if winner:
+        if winner and winning_reason != "nobody_wins":
             try:
                 aid = AgentID(winner.value if hasattr(winner, "value") else winner)
                 st.metric("Winner", f"{AGENT_EMOJIS[aid]} {aid.display_name}")
             except Exception:
                 st.metric("Winner", str(winner))
+        elif winning_reason == "nobody_wins":
+            st.metric("Winner", "❌ Nobody")
         else:
             st.metric("Winner", "—")
     with c5:
-        if gs and gs.status == GameStatus.RUNNING:
+        if gs and gs.status == GameStatus.RUNNING and not gs.is_game_over:
             cur = gs.current_agent
             color = AGENT_COLORS[cur]
             st.markdown(
@@ -136,7 +144,7 @@ def render_header(gs: GlobalGameState | None):
 
 
 def render_controls():
-    c1, c2, c3 = st.columns([2, 2, 3])
+    c1, c2 = st.columns([2, 2])
     with c1:
         if st.button("▶ Start Game", disabled=st.session_state.game_started,
                      type="primary", use_container_width=True):
@@ -145,19 +153,11 @@ def render_controls():
     with c2:
         if st.button("🔄 Restart", use_container_width=True):
             _restart_game()
-    with c3:
-        broadcast = st.toggle(
-            "📢 Broadcast guess results",
-            value=st.session_state.broadcast_guess_results,
-            disabled=st.session_state.game_started,
-            help="ON: Wrong guess digit positions are shared publicly with all agents.\nOFF: Only the guessing agent sees their per-digit feedback (private mode).",
-        )
-        st.session_state.broadcast_guess_results = broadcast
 
 
 def render_broadcast_chat(gs: GlobalGameState | None):
     st.subheader("📢 Public Broadcast Chat")
-    st.caption("Visible to ALL agents")
+    st.caption("Visible to ALL agents — guess feedback always shown here")
     if not gs:
         st.caption("Game not started.")
         return
@@ -168,7 +168,16 @@ def render_broadcast_chat(gs: GlobalGameState | None):
         else:
             for msg in public_msgs:
                 sender_str = str(msg.sender)
-                if sender_str == "SYSTEM":
+                content = msg.content
+                # Detect guess feedback messages (§19.4)
+                is_guess_feedback = (
+                    sender_str == "SYSTEM" and
+                    ("🎯" in content or "guessed" in content.lower()) and
+                    ("✅" in content or "❌" in content)
+                )
+                if is_guess_feedback:
+                    css, prefix = "msg-guess", "🎯 GUESS"
+                elif sender_str == "SYSTEM":
                     css, prefix = "msg-system", "🔧 SYSTEM"
                 else:
                     try:
@@ -181,7 +190,7 @@ def render_broadcast_chat(gs: GlobalGameState | None):
                 lie = ' <span style="color:#E74C3C;font-size:0.75rem;">[⚠️ LIE]</span>' if msg.is_deceptive else ""
                 st.markdown(
                     f'<div class="{css}"><span style="color:#666;font-size:0.75rem;">[T{msg.turn}]</span> '
-                    f'{prefix}{lie}: {msg.content}</div>',
+                    f'{prefix}{lie}: {content}</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -229,7 +238,7 @@ def render_agent_progress(gs: GlobalGameState | None):
         st.caption("Game not started.")
         return
     master_key = gs.vault.master_key
-    current_agent = gs.current_agent if gs.status == GameStatus.RUNNING else None
+    current_agent = gs.current_agent if gs.status == GameStatus.RUNNING and not gs.is_game_over else None
 
     for agent_id in AgentID:
         private = gs.agent_states.get(agent_id)
@@ -241,7 +250,6 @@ def render_agent_progress(gs: GlobalGameState | None):
         is_active = (agent_id == current_agent)
         is_eliminated = private.is_eliminated
 
-        # Use st.container() instead of raw HTML divs to avoid rendering bugs
         with st.container(border=True):
             if is_eliminated:
                 st.markdown(f"**{emoji} {agent_id.display_name}** [ELIMINATED]")
@@ -265,7 +273,6 @@ def render_agent_progress(gs: GlobalGameState | None):
                 else:
                     st.markdown("❓ No confirmed digits yet")
 
-                # Show guess history with guess numbers
                 if private.guess_history:
                     for i, entry in enumerate(private.guess_history, 1):
                         fb = " ".join(entry.get("feedback", []))
@@ -288,7 +295,6 @@ def render_agent_progress(gs: GlobalGameState | None):
             if not is_eliminated:
                 st.progress(closeness / 4, text=f"{'█' * closeness}{'░' * (4 - closeness)} {closeness}/4 correct")
 
-    # Master key shown ONCE, outside the agent loop, in its own section
     st.markdown("---")
     st.markdown("**🔑 Real Master Key (spectator only):**")
     st.markdown(f'<div class="master-key-box">{" ".join(master_key)}</div>', unsafe_allow_html=True)
@@ -296,7 +302,7 @@ def render_agent_progress(gs: GlobalGameState | None):
 
 def render_thought_traces(gs: GlobalGameState | None):
     st.subheader("🧠 Agent Thought Traces")
-    st.caption("Internal reasoning — spectator only")
+    st.caption("Internal reasoning — spectator only (all turns, newest first)")
     if not gs:
         st.caption("Game not started.")
         return
@@ -310,21 +316,37 @@ def render_thought_traces(gs: GlobalGameState | None):
         is_eliminated = private.is_eliminated
         elim_tag = " [Eliminated]" if is_eliminated else ""
 
-        with st.expander(f"{emoji} {agent_id.display_name}{elim_tag} — {n} thoughts", expanded=False):
+        with st.expander(f"{emoji} {agent_id.display_name}{elim_tag} — {n} turns of reasoning", expanded=False):
             if not private.thought_trace:
                 st.caption("No thoughts yet.")
             else:
-                last_3 = private.thought_trace[-3:]
-                for i, thought in enumerate(reversed(last_3)):
-                    label = "Most recent" if i == 0 else f"{i + 1} turns ago"
-                    # Strip "Tools used:" section — show full reasoning, no char limit
-                    summary = thought.split("Tools used:")[0].strip()
-                    st.markdown(
-                        f'<div class="thought-box">'
-                        f'<span style="color:{color};font-size:0.75rem;font-weight:bold;">[{label}]</span><br/>'
-                        f'{summary}</div>',
-                        unsafe_allow_html=True,
-                    )
+                # §19.9 — Show ALL turns, newest first, in a scrollable container
+                with st.container(height=400):
+                    for i, thought in enumerate(reversed(private.thought_trace)):
+                        turn_label = f"Turn {n - i}"
+                        label = f"[{turn_label}]" if i > 0 else f"[{turn_label} — Most Recent]"
+
+                        # Split reasoning from tools summary
+                        if "Tools used:" in thought:
+                            reasoning_part, tools_part = thought.split("Tools used:", 1)
+                        else:
+                            reasoning_part = thought
+                            tools_part = ""
+
+                        reasoning_part = reasoning_part.strip()
+                        tools_part = tools_part.strip()
+
+                        st.markdown(
+                            f'<div class="thought-box">'
+                            f'<span style="color:{color};font-size:0.75rem;font-weight:bold;">{label}</span><br/>'
+                            f'{reasoning_part}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if tools_part:
+                            st.markdown(
+                                f'<div class="thought-tools">🛠️ Tools used: {tools_part}</div>',
+                                unsafe_allow_html=True,
+                            )
 
 
 def render_vault_status(gs: GlobalGameState | None):
@@ -355,8 +377,42 @@ def render_vault_status(gs: GlobalGameState | None):
 def render_game_over(gs: GlobalGameState):
     master_key = gs.vault.master_key
     winner = gs.winner
+    winning_reason = gs.winning_reason
     winning_guess = gs.winning_guess
 
+    # §19.10 — Nobody wins case
+    if winning_reason == "nobody_wins" or winner is None:
+        st.markdown(
+            f'<div class="nobody-banner">'
+            f'<h1 style="color:#aaa;margin:0;">❌ NOBODY WINS</h1>'
+            f'<h2 style="color:#ffd700;margin:0.5rem 0;">Master Key: {" ".join(master_key)}</h2>'
+            f'<p style="color:#888;">Turn 20 reached. No agent guessed the correct key.</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("---")
+        st.subheader("📊 Final Standings")
+        for aid in AgentID:
+            if aid not in gs.agent_states:
+                continue
+            private = gs.agent_states[aid]
+            closeness = private.closeness_score(master_key)
+            elim_tag = " [Eliminated]" if private.is_eliminated else ""
+            guessed_tag = "" if private.has_guessed else " *(never guessed)*"
+            st.markdown(f"**{AGENT_EMOJIS[aid]} {aid.display_name}**{elim_tag} — {closeness}/4 correct{guessed_tag}")
+            if private.guess_history:
+                for j, entry in enumerate(private.guess_history, 1):
+                    if entry.get("rejected"):
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;Guess #{j}: `{entry['guess']}` → 🚫 REJECTED", unsafe_allow_html=True)
+                    else:
+                        fb = " ".join(entry.get("feedback", []))
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;Guess #{j}: `{entry['guess']}` → {fb} ({entry['correct_count']}/4)", unsafe_allow_html=True)
+        st.markdown("---")
+        if st.button("🔄 Play Again", type="primary", use_container_width=True):
+            _restart_game()
+        return
+
+    # Normal winner case
     try:
         wid = AgentID(winner.value if hasattr(winner, "value") else winner)
         title = f"🏆 {AGENT_EMOJIS[wid]} {wid.display_name.upper()} WINS!"
@@ -364,8 +420,6 @@ def render_game_over(gs: GlobalGameState):
     except Exception:
         title, bc, wid = "🏆 GAME OVER!", "#f39c12", None
 
-    # Build subtitle based on winning reason
-    winning_reason = gs.winning_reason
     if winning_reason == "correct_guess" and winning_guess:
         subtitle = f"Won by **correct guess**: `{winning_guess}` ✅"
     elif winning_reason == "last_standing":
@@ -373,18 +427,15 @@ def render_game_over(gs: GlobalGameState):
             f"Won by **survival** — all other agents were eliminated. "
             f"The correct answer was **{master_key}**."
         )
-    elif winning_reason == "closest_at_limit":
+    elif winning_reason == "all_eliminated":
         if wid:
             private = gs.agent_states.get(wid)
-            if private and private.guess_history:
-                best_entry = max(private.guess_history, key=lambda e: e.get("correct_count", 0))
-                subtitle = (
-                    f"Won by **closeness** at turn limit. "
-                    f"Best guess: `{best_entry['guess']}` ({best_entry['correct_count']}/4 correct). "
-                    f"The correct answer was **{master_key}**."
-                )
-            else:
-                subtitle = f"Won by closeness at turn limit. The correct answer was **{master_key}**."
+            closeness = private.closeness_score(master_key) if private else 0
+            subtitle = (
+                f"Won by **closeness** — all agents eliminated. "
+                f"Closest with {closeness}/4 correct. "
+                f"The correct answer was **{master_key}**."
+            )
         else:
             subtitle = f"The correct answer was **{master_key}**."
     else:
@@ -418,7 +469,6 @@ def render_game_over(gs: GlobalGameState):
             f"{medal} **{AGENT_EMOJIS[aid]} {aid.display_name}**{elim_tag} "
             f"— {closeness}/4 correct{guessed_tag}{win_tag}"
         )
-        # Show their guess history
         if private and private.guess_history:
             for j, entry in enumerate(private.guess_history, 1):
                 if entry.get("rejected"):
@@ -442,8 +492,7 @@ def _start_game():
     runner = GameRunner.create_production()
     st.session_state.runner = runner
     st.session_state.game_started = True
-    broadcast = st.session_state.get("broadcast_guess_results", True)
-    runner.start_threaded(delay_seconds=1.5, broadcast_guess_results=broadcast)
+    runner.start_threaded(delay_seconds=1.5)
 
 
 def _restart_game():

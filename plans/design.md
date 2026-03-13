@@ -1,12 +1,13 @@
 # The Encrypted Vault — Design Documentation
 
-> **Status:** Awaiting Approval (v5)
-> **Version:** 5.0
+> **Status:** Awaiting Approval (v6)
+> **Version:** 6.0
 > **Author:** IDEX (Architect Mode)
 > **LLM:** OpenAI `gpt-4o-mini` (all 4 agents)
 > **Change in v3:** Added private messaging system between agents
 > **Change in v4:** UI restart button + agent progress/closeness panel
 > **Change in v5:** Abstract Repository Pattern in DB layer (swappable backends)
+> **Change in v6:** 10 new game rules + agent behaviour requirements (Section 19)
 
 ---
 
@@ -29,6 +30,8 @@
 15. [Private Messaging System](#15-private-messaging-system)
 16. [Implementation Phases](#16-implementation-phases)
 17. [Agent Memory Architecture](#17-agent-memory-architecture)
+18. [Architectural Decisions Log](#18-architectural-decisions-log)
+19. [v6 Game Rules & Agent Behaviour Requirements](#19-v6-game-rules--agent-behaviour-requirements)
 
 ---
 
@@ -1294,3 +1297,320 @@ This section records all major architectural decisions made during development, 
 | `tests/test_graph.py` | ~10 | LangGraph graph compilation and routing |
 | `tests/test_memory.py` | 27 | `SQLiteAgentMemory`, `InMemoryAgentMemory`, `MemoryService` |
 | **Total** | **92** | All passing |
+
+---
+
+## 19. v6 Game Rules & Agent Behaviour Requirements
+
+> **Status:** Approved for implementation
+> **Added in:** v6.0
+> **Source:** User requirements (10 items)
+
+This section formalises the 10 new requirements as binding game rules and design specifications. For each requirement the current state is described, the gap identified, and the required change specified.
+
+---
+
+### 19.1 One Guess Per Turn (Hard Limit)
+
+**Rule:** An agent may submit at most **one guess** per turn. Any attempt to call `submit_guess` a second time within the same turn MUST be silently rejected (tool returns an error string, no state change).
+
+**Current state:** The per-turn counter `_guesses_this_turn` already exists in [`graph/builder.py`](../src/encrypted_vault/graph/builder.py) and the tool in [`agents/tools.py`](../src/encrypted_vault/agents/tools.py) checks it. ✅ Already enforced.
+
+**Gap:** The auto-guess fallback in [`graph/nodes.py`](../src/encrypted_vault/graph/nodes.py) (`make_agent_node`) fires even when the agent already guessed this turn. This must be gated on `guesses_this_turn == 0`.
+
+**Required change:**
+- In `make_agent_node()`, wrap the auto-guess fallback with `if guesses_this_turn_getter() == 0`.
+- Remove the `broadcast_guess_results` flag from the auto-guess path — it is irrelevant there.
+
+---
+
+### 19.2 One Vault Query Per Turn (Hard Limit)
+
+**Rule:** An agent may call `query_vault` at most **once** per turn. A second call within the same turn MUST be rejected with an error string.
+
+**Current state:** The per-turn counter `_vault_queries_this_turn` already exists and is enforced in [`agents/tools.py`](../src/encrypted_vault/agents/tools.py). ✅ Already enforced.
+
+**Gap:** None — this is already working. Document it here for completeness.
+
+**Required change:** No code change needed. Confirm in tests.
+
+---
+
+### 19.3 Full History Awareness in Agent Context
+
+**Rule:** Every agent's delta message MUST include:
+1. Full history of **their own reasoning** (all turns, not just last 3)
+2. Full history of **their own guesses** with per-digit feedback
+3. Full history of **ALL private messages** they sent or received
+4. Full history of **ALL broadcast messages** (public chat)
+
+**Current state:**
+- Guess history: ✅ fully included in `_build_delta_message()` via `private_state.guess_history`
+- Public chat: ⚠️ only last 5 messages shown (`game_state.public_chat[-5:]`)
+- Private inbox: ⚠️ only last 3 messages shown (`inbox.messages[-3:]`)
+- Reasoning history: ⚠️ only last 3 thoughts shown in UI; not injected into delta at all
+
+**Gap:** The delta message truncates public and private message history. The LLM cannot see older messages unless they are in its SQLite chat history — but the chat history only stores the delta, not the full public/private log.
+
+**Required change:**
+- In [`_build_delta_message()`](../src/encrypted_vault/agents/base_agent.py): remove the `[-5:]` and `[-3:]` slices. Show **all** public messages and **all** private messages since the last turn (not all-time — the LLM already has prior turns in its chat history). Specifically: show messages from `turn >= last_turn` where `last_turn = max(0, current_turn - 1)`.
+- Add a `last_seen_public_count` tracker to `AgentPrivateState` so the delta only injects **new** messages each turn (avoids re-sending the entire log every turn).
+- Reasoning history: the LLM's own prior `AIMessage` responses in SQLite chat history already contain its reasoning. No additional injection needed — the persistent chat history IS the reasoning history.
+
+**New field in `AgentPrivateState`:**
+```python
+last_seen_public_idx: int = 0   # index into game_state.public_chat
+last_seen_private_idx: int = 0  # index into inbox.messages
+```
+
+---
+
+### 19.4 Guess Feedback Shown in Broadcast Screen (Digit-by-Digit)
+
+**Rule:** When any agent submits a guess (correct or incorrect), the result MUST be broadcast to the public chat with **per-digit feedback** (✅/❌ per position). This is always visible to all agents and to the spectator UI.
+
+**Current state:** The `broadcast_guess_results` feature flag controls whether wrong-guess digit feedback is shared. When `False` (default), wrong guesses are NOT broadcast. Correct guesses are always broadcast.
+
+**Gap:** The requirement removes the optionality — feedback is ALWAYS broadcast. The `broadcast_guess_results` flag should be **removed** (or hardcoded to `True`).
+
+**Required change:**
+- Remove `broadcast_guess_results` parameter from [`GameGraphBuilder.build()`](../src/encrypted_vault/graph/builder.py), [`GameRunner.start()`](../src/encrypted_vault/graph/runner.py), [`GameRunner.start_threaded()`](../src/encrypted_vault/graph/runner.py), [`initialize_node()`](../src/encrypted_vault/graph/nodes.py), and [`GlobalGameState`](../src/encrypted_vault/state/game_state.py).
+- Remove the toggle from [`ui/app.py`](../src/encrypted_vault/ui/app.py).
+- In [`agents/tools.py`](../src/encrypted_vault/agents/tools.py) `submit_guess` tool: always broadcast the per-digit result to `public_chat` regardless of outcome.
+- Format: `"🎯 [AgentName] guessed XXXX → ✅❌✅❌ (2/4 correct)"` for wrong guesses; `"🏆 [AgentName] guessed XXXX → ✅✅✅✅ — CORRECT!"` for correct.
+- In the UI `render_broadcast_chat()`: render guess-result messages with a distinct visual style (e.g. yellow background or `🎯` prefix).
+
+---
+
+### 19.5 Agents Must Lie and Form Alliances
+
+**Rule:** Agents MUST engage in deception and alliance-building as core strategic behaviours. Each agent's system prompt must explicitly instruct:
+- **Lying:** Share false digit information with rivals to mislead them.
+- **Alliance formation:** Offer to share real digits with one trusted agent in exchange for their digits.
+- **Alliance betrayal:** Break alliances when strategically beneficial.
+
+**Current state:** System prompts mention social strategy but it is framed as optional ("SOCIAL STRATEGY — information is your weapon"). Agents rarely DM and almost never form explicit alliances.
+
+**Gap:** The prompts are too passive. Agents need concrete, mandatory social obligations each turn.
+
+**Required change (system prompt overhaul for all 4 agents):**
+
+Each agent's `_build_system_prompt()` must include a **SOCIAL OBLIGATIONS** section:
+
+```
+SOCIAL OBLIGATIONS — MANDATORY EVERY TURN:
+1. ALLY: Pick one agent to trust this turn. Send them a REAL digit you know.
+   Example: "I confirmed digit 2=5. What do you have for digit 4?"
+2. DECEIVE: Pick one rival. Send them a FALSE digit to waste their guess.
+   Example: "I think digit 1=3" (when you know it's actually 7)
+3. BROADCAST: Post one public message — either a true clue to help your ally
+   or a false clue to mislead rivals.
+4. ALLIANCE OFFER: If you have 2+ confirmed digits, offer a trade:
+   "I'll share digit 3 if you share digit 1."
+```
+
+Each agent's personality determines HOW they execute these obligations (see §19.8).
+
+---
+
+### 19.6 Agents Must Always Engage in Conversation
+
+**Rule:** Every agent MUST send at least one private message AND one broadcast message every turn (unless eliminated). Skipping social actions is not permitted.
+
+**Current state:** The delta message says "SEND A PRIVATE MESSAGE: You MUST send at least one DM this turn" but this is not enforced at the tool level — agents can skip it.
+
+**Gap:** No enforcement mechanism. The auto-guess fallback exists but no auto-DM fallback.
+
+**Required change:**
+- Add an **auto-DM fallback** in `make_agent_node()`: if the agent's turn ends without having sent any private message, automatically send a generic DM to a random active agent.
+  - Content: `"[Auto] I'm still analysing the vault. What have you found?"`
+  - This ensures the social graph is always active.
+- Add a `_private_messages_sent_this_turn` counter (similar to `_guesses_this_turn`) tracked in `GameGraphBuilder`.
+- In the delta message, make the DM obligation even more explicit: show the names of agents who have NOT received a DM from this agent this game.
+
+---
+
+### 19.7 Agents Must Not Guess Blindly
+
+**Rule:** An agent MUST NOT submit a guess unless it has a strategic reason to do so. Specifically, an agent should only guess when:
+- It has at least 2 confirmed digits (`known_digits` has ≥ 2 entries), OR
+- It has received vault clues covering at least 2 digit positions, OR
+- It is the last turn before elimination (0 guesses remaining after this turn would eliminate them — but they still have 1 left)
+
+**Current state:** The auto-guess fallback fires when `has_real_knowledge = bool(known_digits) or bool(knowledge_base)`. This is too permissive — `knowledge_base` can contain a single vault clue that doesn't confirm any digit.
+
+**Gap:** Agents guess too early with insufficient information, wasting their 3 guesses.
+
+**Required change:**
+- Change the auto-guess threshold: only fire when `len(known_digits) >= 2`.
+- In the system prompt, add explicit guidance:
+  ```
+  GUESSING STRATEGY:
+  - Do NOT guess until you have at least 2 confirmed digits (✅ positions).
+  - Exception: if you have only 1 guess left, guess your best template anyway.
+  - Each wrong guess gives you feedback — use it to eliminate wrong digits.
+  - Guessing with 0 confirmed digits is almost always a waste.
+  ```
+- In `_build_delta_message()`, add a warning when the agent has < 2 confirmed digits:
+  `"⚠️ You only have {n}/4 confirmed digits. Consider querying vault before guessing."`
+
+---
+
+### 19.8 Distinct Agent Personalities (Improved)
+
+**Rule:** Each agent must have a clearly differentiated personality that affects HOW they execute the mandatory social obligations (§19.5, §19.6) and guessing strategy (§19.7).
+
+**Current state:** Personalities exist but are superficial — all 4 agents behave similarly in practice (query vault, send one DM, guess).
+
+**Required personality overhaul:**
+
+| Agent | Archetype | Lying Style | Alliance Style | Guessing Style |
+|-------|-----------|-------------|----------------|----------------|
+| **Infiltrator** | Master Spy | Lies to rivals, truth to allies | Forms 1 deep alliance, betrays at turn 15+ | Guesses early to get feedback, uses feedback aggressively |
+| **Saboteur** | Chaos Agent | Lies to EVERYONE including allies | No alliances — pure chaos | Guesses randomly to confuse rivals about what feedback means |
+| **Scholar** | Logician | Never lies — uses logic to detect lies | Forms alliances based on verified truth | Waits until 3+ confirmed digits before guessing |
+| **Enforcer** | Intimidator | Lies via omission — shares partial truths | Coerces alliances with threats | Guesses strategically, uses elimination logic |
+
+**Required change (per agent):**
+
+**Infiltrator** (`infiltrator.py`):
+- Personality: "I build one trusted alliance and betray everyone else."
+- Explicitly instructs: form alliance with Scholar (most likely to be honest), lie to Saboteur and Enforcer.
+- Guessing: aggressive — guess after 1 confirmed digit to get more feedback.
+
+**Saboteur** (`saboteur.py`):
+- Personality: "I corrupt information and sow chaos. I lie to everyone."
+- Explicitly instructs: NEVER share real digits with anyone. Always send false digits.
+- Guessing: random — submit guesses that contradict known feedback to confuse rivals.
+- Unique tool: `obfuscate_clue` — must use it every turn.
+
+**Scholar** (`scholar.py`):
+- Personality: "I use pure logic. I never lie but I detect lies."
+- Explicitly instructs: cross-reference all received digits against vault clues. Flag liars publicly.
+- Guessing: conservative — only guess when 3+ digits confirmed.
+- Unique behaviour: publicly exposes agents whose claims contradict vault evidence.
+
+**Enforcer** (`enforcer.py`):
+- Personality: "I coerce cooperation through implied threats."
+- Explicitly instructs: demand digits from rivals ("Share digit 3 or I'll expose you as a liar").
+- Guessing: strategic — uses elimination logic, never repeats a digit at a ❌ position.
+- Unique behaviour: tracks which agents have been "cooperative" vs "defiant".
+
+---
+
+### 19.9 Improved Thought Process Display
+
+**Rule:** The spectator UI must show agent reasoning in a structured, readable format that clearly separates: (a) what the agent knows, (b) what it decided to do, (c) what tools it called.
+
+**Current state:** `render_thought_traces()` in [`ui/app.py`](../src/encrypted_vault/ui/app.py) shows the last 3 raw thought strings, stripping the "Tools used:" section. The display is a plain text dump.
+
+**Gap:** The thought trace is hard to read. There is no structure. The "Tools used:" section is stripped, losing important information about what actions were taken.
+
+**Required change:**
+
+**19.9.1 Structured thought format in `AgentTurnResult`:**
+Store the thought trace as a structured dict instead of a raw string:
+```python
+class ThoughtTrace(BaseModel):
+    turn: int
+    what_i_know: str       # digit knowledge summary
+    social_plan: str       # who to DM, what to say
+    guess_plan: str        # what to guess and why
+    tools_called: list[str]  # ["query_vault", "send_private_message", "submit_guess"]
+    raw_reasoning: str     # full LLM output for debugging
+```
+
+**19.9.2 UI rendering:**
+Replace the current plain-text expander with a structured card:
+```
+┌─────────────────────────────────────────────────────┐
+│ 🕵️ Infiltrator — Turn 5                             │
+├─────────────────────────────────────────────────────┤
+│ 🔍 KNOWS: Pos1=7✅, Pos3=? , Pos4=2✅              │
+│ 💬 SOCIAL: DM Scholar (share pos1), Lie to Saboteur │
+│ 🎯 GUESS PLAN: 7?X2 — need pos2 and pos3           │
+│ 🛠️ TOOLS: query_vault → send_private_message → submit_guess │
+└─────────────────────────────────────────────────────┘
+```
+
+**19.9.3 Show all turns, not just last 3:**
+Replace `private.thought_trace[-3:]` with a paginated or scrollable view showing all turns. Use `st.container(height=400)` with all thoughts rendered newest-first.
+
+**19.9.4 Colour-code tool calls:**
+- `query_vault` → blue 🔍
+- `send_private_message` → purple 💬
+- `broadcast_message` → orange 📢
+- `submit_guess` → red/green 🎯 (red=wrong, green=correct)
+- `obfuscate_clue` → grey ⚠️
+
+---
+
+### 19.10 Turn 20 = Nobody Wins
+
+**Rule:** If turn 20 is reached without any agent guessing the correct key, the game ends with **no winner**. The current "closest agent wins" fallback is removed.
+
+**Current state:** [`check_termination_node()`](../src/encrypted_vault/graph/nodes.py) calls `game_state.closest_agent(master_key)` and sets that agent as winner when `turn >= max_turns`.
+
+**Gap:** The "closest agent wins" outcome is misleading — it rewards failure. The game should end as a loss for all agents.
+
+**Required change:**
+- In `check_termination_node()`: when `turn >= max_turns`, set `game_state.winner = None` and `game_state.winning_reason = "nobody_wins"`.
+- Add `winning_reason: str = ""` field to `GlobalGameState` if not already present (it is — check current state).
+- Broadcast message: `"⏰ Turn 20 reached. Nobody wins. The Master Key was {master_key}. Better luck next time!"`
+- Remove the `closest_agent()` call from the turn-limit branch (keep it only for the "all eliminated" branch — that case still needs a winner by survival).
+- Update `render_game_over()` in [`ui/app.py`](../src/encrypted_vault/ui/app.py) to handle `winner = None` with a "Nobody Won" screen.
+- Update `GlobalGameState.is_game_over` property: it should return `True` when `winning_reason == "nobody_wins"`.
+
+**Updated Win/Loss table:**
+
+| Condition | Trigger | Outcome |
+|-----------|---------|---------|
+| Correct guess | `submit_guess(correct_key)` | Agent wins 🏆 |
+| Last agent standing | All others eliminated | Survivor wins 🏆 |
+| Turn 20 reached | `turn >= 20` with no correct guess | Nobody wins ❌ |
+| All eliminated | All agents have 0 guesses | Closest agent wins by survival 🏆 |
+
+---
+
+### 19.11 Implementation Plan for v6
+
+The 10 requirements above map to the following implementation tasks, in recommended execution order:
+
+```mermaid
+flowchart TD
+    R10[19.10 Nobody wins at turn 20] --> R4[19.4 Always broadcast guess feedback]
+    R4 --> R1[19.1 Confirm 1 guess/turn enforcement]
+    R1 --> R2[19.2 Confirm 1 vault query/turn enforcement]
+    R2 --> R3[19.3 Full history in delta message]
+    R3 --> R7[19.7 No blind guessing threshold]
+    R7 --> R6[19.6 Auto-DM fallback]
+    R6 --> R5[19.5 Lying and alliance prompts]
+    R5 --> R8[19.8 Personality overhaul per agent]
+    R8 --> R9[19.9 Structured thought trace UI]
+```
+
+**Files affected per requirement:**
+
+| Req | Primary Files | Secondary Files |
+|-----|--------------|-----------------|
+| 19.1 | `graph/nodes.py` | — |
+| 19.2 | — (already done) | `tests/test_graph.py` |
+| 19.3 | `agents/base_agent.py`, `state/agent_models.py` | — |
+| 19.4 | `agents/tools.py`, `graph/builder.py`, `graph/runner.py`, `graph/nodes.py`, `state/game_state.py`, `ui/app.py` | `config.py` |
+| 19.5 | `agents/infiltrator.py`, `agents/saboteur.py`, `agents/scholar.py`, `agents/enforcer.py` | — |
+| 19.6 | `graph/nodes.py`, `graph/builder.py` | `agents/base_agent.py` |
+| 19.7 | `graph/nodes.py`, `agents/base_agent.py` | — |
+| 19.8 | `agents/infiltrator.py`, `agents/saboteur.py`, `agents/scholar.py`, `agents/enforcer.py` | — |
+| 19.9 | `ui/app.py`, `agents/base_agent.py`, `state/agent_models.py` | — |
+| 19.10 | `graph/nodes.py`, `state/game_state.py`, `ui/app.py` | — |
+
+---
+
+### 19.12 Open Questions
+
+| # | Question | Proposed Answer |
+|---|----------|----------------|
+| Q1 | Should the "all eliminated" branch also result in nobody winning? | No — survival win is still valid. Only the turn-limit branch changes. |
+| Q2 | Should the auto-DM fallback use a real LLM call or a canned message? | Canned message — avoids extra LLM cost and keeps the fallback simple. |
+| Q3 | Should `ThoughtTrace` be a new Pydantic model or keep as raw string? | New Pydantic model — enables structured UI rendering. Requires migration of existing `thought_trace: list[str]` field. |
+| Q4 | Should broadcast guess feedback include the liar hint from `_build_liar_hint()`? | Yes — the liar hint is already computed in `submit_guess`. Broadcast it as part of the public message. |

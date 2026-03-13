@@ -422,16 +422,15 @@ class BaseAgent(ABC):
         """
         Build a compact delta HumanMessage for this turn.
 
-        Contains ONLY:
+        Contains ONLY new events since the last turn:
         - Current game status (turn, guesses left, other agents)
         - Confirmed digits (ground truth — always current)
-        - Previous guesses + feedback
-        - NEW public messages since last turn (last 5)
-        - NEW private messages (last 3)
+        - Full guess history
+        - NEW public messages since last turn (using last_seen_public_idx cursor)
+        - NEW private messages since last turn (using last_seen_private_idx cursor)
         - Action guidance based on current knowledge
 
-        This replaces the full context rebuild. The LLM uses its conversation
-        history for all prior reasoning — no need to re-inject old memories.
+        The LLM uses its conversation history for all prior reasoning.
         """
         lines: list[str] = []
         turn = game_state.turn
@@ -455,9 +454,9 @@ class BaseAgent(ABC):
             lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             lines.append("")
 
-        # Previous guesses with explicit constraint reminder
+        # Full guess history
         if private_state.guess_history:
-            lines.append("YOUR GUESS HISTORY:")
+            lines.append("YOUR FULL GUESS HISTORY:")
             for i, entry in enumerate(private_state.guess_history, 1):
                 if entry.get("rejected"):
                     lines.append(f"  Guess #{i}: '{entry['guess']}' → 🚫 REJECTED (duplicate — never repeat)")
@@ -482,26 +481,31 @@ class BaseAgent(ABC):
                 active_agents.append(aid.display_name)
         lines.append("")
 
-        # Recent public messages (last 5)
-        recent_public = game_state.public_chat[-5:]
-        if recent_public:
-            lines.append("RECENT PUBLIC CHAT:")
-            for msg in recent_public:
-                lines.append(f"  [{msg.sender}]: {msg.content}")
+        # §19.3 — NEW public messages since last turn (using cursor)
+        pub_start = private_state.last_seen_public_idx
+        new_public = game_state.public_chat[pub_start:]
+        if new_public:
+            lines.append(f"NEW PUBLIC CHAT ({len(new_public)} new message(s) since your last turn):")
+            for msg in new_public:
+                lines.append(f"  [T{msg.turn}] [{msg.sender}]: {msg.content}")
+            lines.append("")
+        elif game_state.public_chat:
+            lines.append("(No new public messages since your last turn — see your chat history above.)")
             lines.append("")
 
-        # Private messages (last 3)
+        # §19.3 — NEW private messages since last turn (using cursor)
         inbox = game_state.private_inboxes.get(self.agent_id)
-        if inbox and inbox.messages:
-            recent_dms = inbox.messages[-3:]
-            lines.append("YOUR PRIVATE INBOX (act on these!):")
-            for msg in recent_dms:
-                lines.append(f"  From [{msg.sender}]: {msg.content}")
+        priv_start = private_state.last_seen_private_idx
+        new_dms = inbox.messages[priv_start:] if inbox else []
+        if new_dms:
+            lines.append(f"NEW PRIVATE MESSAGES ({len(new_dms)} new DM(s) since your last turn — ACT ON THESE!):")
+            for msg in new_dms:
+                lines.append(f"  [T{msg.turn}] From [{msg.sender}]: {msg.content}")
             lines.append("")
 
         # Current suspected key
         if private_state.suspected_key:
-            lines.append(f"Your current best guess: {private_state.suspected_key}")
+            lines.append(f"Your current best guess template: {private_state.suspected_key}")
             lines.append("")
 
         # ── MANDATORY ACTIONS THIS TURN ────────────────────────────────────
@@ -509,7 +513,7 @@ class BaseAgent(ABC):
         lines.append("MANDATORY ACTIONS THIS TURN (you MUST do ALL of these):")
         lines.append("")
 
-        # 1. Vault query (if no knowledge yet)
+        # 1. Vault query
         if not private_state.knowledge_base:
             lines.append("1. 🔍 QUERY THE VAULT: Call query_vault('master key digit') to find clues.")
             lines.append("   You have NO vault knowledge yet — guessing without clues is wasteful!")
@@ -518,27 +522,34 @@ class BaseAgent(ABC):
 
         # 2. Social action — MANDATORY every turn
         if active_agents:
-            lines.append(f"2. 💬 SEND A PRIVATE MESSAGE: You MUST send at least one DM this turn.")
+            lines.append(f"2. 💬 SEND PRIVATE MESSAGES: You MUST send at least one DM this turn.")
             lines.append(f"   Active agents you can DM: {', '.join(active_agents)}")
-            lines.append("   Ask for a specific digit, share what you know, form an alliance, or deceive a rival.")
-            lines.append("   Example: send_private_message('infiltrator', 'What is digit 3? I have digit 1=7')")
+            lines.append("   Per your personality: send real info to your ally, false info to rivals.")
+            lines.append("   Example: send_private_message('scholar', 'I confirmed digit 1=7. What is digit 3?')")
         else:
             lines.append("2. 💬 BROADCAST: All other agents are eliminated — broadcast your findings.")
 
-        # 3. Guess guidance
+        # 3. Guess guidance — §19.7: require 2+ confirmed digits
         guesses_left = private_state.guesses_remaining
+        confirmed_count = len(private_state.known_digits)
         if guesses_left > 0:
-            if private_state.known_digits:
+            if confirmed_count >= 2:
                 template = ["?"] * 4
                 for pos, digit in private_state.known_digits.items():
                     template[pos] = digit
-                lines.append(f"3. 🎯 SUBMIT GUESS when ready. Template from confirmed digits: {''.join(template)}")
-                lines.append("   Fill '?' with your best estimate. NEVER change ✅ positions!")
+                lines.append(f"3. 🎯 SUBMIT GUESS — you have {confirmed_count}/4 confirmed digits!")
+                lines.append(f"   Template: {''.join(template)} — fill '?' with your best estimate.")
+                lines.append("   NEVER change ✅ positions! NEVER use ❌ digits at their positions!")
+            elif confirmed_count == 1:
+                lines.append(f"3. ⚠️ HOLD OFF on guessing — you only have {confirmed_count}/4 confirmed digit.")
+                lines.append("   Query vault and gather more intel before spending a guess.")
+                lines.append("   Exception: if this is your last guess, submit your best template anyway.")
             elif private_state.guess_history:
-                lines.append("3. 🎯 SUBMIT GUESS: Use feedback from previous guesses to pick new digits.")
-                lines.append("   Change ALL ❌ positions. Keep any ✅ positions.")
+                lines.append("3. ⚠️ HOLD OFF on guessing — you have 0 confirmed digits.")
+                lines.append("   Use feedback from previous guesses + vault clues to deduce more digits first.")
             else:
-                lines.append("3. 🎯 SUBMIT GUESS after querying vault. Use vault clues to pick digits.")
+                lines.append("3. ⚠️ DO NOT GUESS YET — query vault first, then gather intel from allies.")
+                lines.append("   Guessing with 0 confirmed digits wastes your precious 3 guesses.")
         else:
             lines.append("3. You are ELIMINATED — no more guesses. Focus on social actions.")
 

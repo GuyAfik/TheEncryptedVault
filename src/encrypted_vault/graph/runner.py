@@ -65,17 +65,13 @@ class GameRunner:
 
     # ── Game lifecycle ─────────────────────────────────────────────────────
 
-    def start(self, broadcast_guess_results: bool = True) -> Generator[GlobalGameState, None, None]:
+    def start(self) -> Generator[GlobalGameState, None, None]:
         """
         Run the game synchronously and yield GlobalGameState after each agent turn.
         Suitable for tests and direct iteration.
-
-        Args:
-            broadcast_guess_results: Feature flag — when False, wrong guess digit
-                positions are NOT broadcast publicly (private mode).
         """
         builder = GameGraphBuilder(services=self._services)
-        graph = builder.build(broadcast_guess_results=broadcast_guess_results)
+        graph = builder.build()
 
         initial_game_state = self._services.game.build_initial_state(
             max_turns=settings.max_turns,
@@ -98,7 +94,6 @@ class GameRunner:
     def start_threaded(
         self,
         delay_seconds: float = 1.5,
-        broadcast_guess_results: bool = True,
     ) -> None:
         """
         Run the game in a background daemon thread.
@@ -107,14 +102,12 @@ class GameRunner:
 
         Args:
             delay_seconds: Pause between turns for UI readability.
-            broadcast_guess_results: Feature flag — when False, wrong guess digit
-                positions are NOT broadcast publicly (private mode).
         """
         self._stop_event.clear()
 
         def _run():
             try:
-                for state in self.start(broadcast_guess_results=broadcast_guess_results):
+                for state in self.start():
                     if self._stop_event.is_set():
                         break
                     # Store latest state (thread-safe)

@@ -1,6 +1,5 @@
 """Global game state — the single source of truth passed through LangGraph."""
 
-from typing import Literal
 from typing_extensions import TypedDict
 
 from pydantic import BaseModel, Field, model_validator
@@ -48,12 +47,7 @@ class GlobalGameState(BaseModel):
     """The exact 4-digit guess that won the game (if won by correct guess)."""
 
     winning_reason: str = ""
-    """Human-readable reason for winning: 'correct_guess', 'last_standing', 'closest_at_limit'."""
-
-    # ── Feature flags (set once at game start, immutable during play) ──────
-    broadcast_guess_results: bool = False
-    """When True, wrong guess digit positions are broadcast publicly after each guess.
-    When False, only the guessing agent sees their per-digit feedback (private mode)."""
+    """Human-readable reason: 'correct_guess', 'last_standing', 'all_eliminated', 'nobody_wins'."""
 
     # ── Shared environment ─────────────────────────────────────────────────
     vault: VaultState
@@ -95,8 +89,8 @@ class GlobalGameState(BaseModel):
 
     @property
     def is_game_over(self) -> bool:
-        """True if the game has ended for any reason."""
-        return self.status != GameStatus.RUNNING
+        """True if the game has ended for any reason (including nobody_wins)."""
+        return self.status != GameStatus.RUNNING or self.winning_reason == "nobody_wins"
 
     @property
     def all_agents_exhausted(self) -> bool:
@@ -138,6 +132,12 @@ class GlobalGameState(BaseModel):
         """Mark the game as over with the given agent winner."""
         self.winner = winner
         self.status = GameStatus.AGENT_WIN
+
+    def set_no_winner(self) -> None:
+        """Mark the game as over with no winner (turn limit reached, nobody guessed correctly)."""
+        self.winner = None
+        self.winning_reason = "nobody_wins"
+        self.status = GameStatus.AGENT_WIN  # reuse AGENT_WIN status; winner=None signals nobody won
 
     # ── Serialisation ──────────────────────────────────────────────────────
 

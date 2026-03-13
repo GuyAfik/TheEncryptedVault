@@ -100,7 +100,13 @@ def make_broadcast_message_tool(services: ServiceContainer, agent_id: AgentID, t
     return broadcast_message
 
 
-def make_send_private_message_tool(services: ServiceContainer, agent_id: AgentID, turn_getter):
+def make_send_private_message_tool(
+    services: ServiceContainer,
+    agent_id: AgentID,
+    turn_getter,
+    private_messages_sent_getter=None,
+    private_messages_sent_setter=None,
+):
     valid_recipients = [a.value for a in AgentID if a != agent_id]
 
     @tool
@@ -112,6 +118,7 @@ def make_send_private_message_tool(services: ServiceContainer, agent_id: AgentID
         Send a private direct message to a specific agent.
         Only the recipient can read this — other agents cannot see it.
         Use this for secret negotiations, sharing real findings, or targeted deception.
+        You MUST send at least one private message every turn.
         """
         try:
             recipient_id = AgentID(recipient)
@@ -121,6 +128,9 @@ def make_send_private_message_tool(services: ServiceContainer, agent_id: AgentID
             return {"success": False, "error": "Cannot send a private message to yourself."}
         logger.info("[%s] DM → [%s]: %s", agent_id.value, recipient, content[:60])
         services.chat.send_private(turn=turn_getter(), sender=agent_id, recipient=recipient_id, content=content)
+        # Track private messages sent this turn
+        if private_messages_sent_getter is not None and private_messages_sent_setter is not None:
+            private_messages_sent_setter(private_messages_sent_getter() + 1)
         return {"success": True, "message": f"Private message sent to {recipient}."}
 
     return send_private_message
@@ -280,6 +290,8 @@ def build_tools_for_agent(
     guesses_this_turn_setter=None,
     obfuscate_this_turn_getter=None,
     obfuscate_this_turn_setter=None,
+    private_messages_sent_getter=None,
+    private_messages_sent_setter=None,
 ) -> list:
     """
     Build the complete tool list for a given agent.
@@ -287,6 +299,7 @@ def build_tools_for_agent(
     ALL agents now have submit_guess.
     Only Saboteur has obfuscate_clue.
     Rate limits: 1 vault query per turn, 1 guess per turn.
+    Guess feedback is always broadcast publicly.
 
     Tool Access Matrix:
     ┌──────────────────────┬─────────────┬─────────┬─────────┬──────────┐
@@ -312,7 +325,11 @@ def build_tools_for_agent(
             obfuscate_this_turn_setter=obfuscate_this_turn_setter,
         ))
     tools.append(make_broadcast_message_tool(services, agent_id, turn_getter))
-    tools.append(make_send_private_message_tool(services, agent_id, turn_getter))
+    tools.append(make_send_private_message_tool(
+        services, agent_id, turn_getter,
+        private_messages_sent_getter=private_messages_sent_getter,
+        private_messages_sent_setter=private_messages_sent_setter,
+    ))
     # ALL agents get submit_guess
     if all(x is not None for x in [master_key_getter, game_over_setter,
                                     guesses_remaining_getter, guesses_remaining_setter]):

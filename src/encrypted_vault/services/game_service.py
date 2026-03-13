@@ -138,7 +138,6 @@ class GameService:
         self,
         max_turns: int = 20,
         token_budget: int = 8000,
-        broadcast_guess_results: bool = True,
     ) -> GlobalGameState:
         """
         Generate a fresh Master Key, seed the vault, and build the initial
@@ -147,8 +146,6 @@ class GameService:
         Args:
             max_turns: Maximum number of turns before the game ends.
             token_budget: Token budget per agent (kept for compatibility).
-            broadcast_guess_results: Feature flag — when False, wrong guess
-                digit positions are NOT broadcast publicly (private mode).
         """
         master_key = self.generate_master_key()
         vault_state = self.seed_vault(master_key)
@@ -156,7 +153,6 @@ class GameService:
         agent_states = {
             agent_id: AgentPrivateState(
                 agent_id=agent_id,
-                token_budget=token_budget,
             )
             for agent_id in AgentID
         }
@@ -170,7 +166,6 @@ class GameService:
             vault=vault_state,
             agent_states=agent_states,
             private_inboxes=private_inboxes,
-            broadcast_guess_results=broadcast_guess_results,
         )
 
     # ── Win condition ──────────────────────────────────────────────────────
