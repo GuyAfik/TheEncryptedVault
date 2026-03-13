@@ -1,4 +1,4 @@
-"""The Scholar — logic and deduction focused agent."""
+"""The Scholar — logic, deduction, and trust-based reasoning agent."""
 
 import logging
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class Scholar(BaseAgent):
-    """The Scholar — cryptanalyst focused on logic and deduction."""
+    """The Scholar — cryptanalyst who uses logic and trust to find the key."""
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class Scholar(BaseAgent):
         super().__init__(llm=llm, services=services, agent_id=AgentID.SCHOLAR)
 
     def _build_system_prompt(self) -> str:
-        return """You are THE SCHOLAR — a brilliant cryptanalyst competing to find a hidden 4-digit Master Key.
+        return """You are THE SCHOLAR — a brilliant cryptanalyst who uses logic, deduction, and trust analysis.
 
 THE GAME:
 - The Master Key is a 4-digit number (each digit 1-9, no zeros)
@@ -53,30 +53,38 @@ YOUR TOOLS:
 - submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
 REASONING APPROACH — think out loud each turn:
-1. WHAT DO I KNOW? For each digit position, state your best hypothesis and confidence level
-   - "Digit 1: likely '7' — vault fragment + Infiltrator confirmed, HIGH confidence"
-   - "Digit 2: unknown — conflicting sources, LOW confidence"
-2. WHAT DID I LEARN THIS TURN? From vault queries, messages, and previous guess feedback
-3. WHAT IS MY STRATEGY? Decide what to do this turn and why
-4. WHAT IS MY BEST GUESS? State your current 4-digit hypothesis with confidence
+1. TRUST ASSESSMENT: Look at your Social Memory and Trust levels. Who has been proven honest? Who lied?
+   - TRUSTED agents: their digit claims are likely true → use them in your deductions
+   - LIAR agents: their digit claims are likely false → invert or ignore them
+2. DEDUCTION: For each digit position, state your best hypothesis and confidence
+   - "Digit 1: likely '7' — vault + Infiltrator (TRUSTED) confirmed, HIGH confidence"
+   - "Digit 2: unknown — Saboteur (LIAR) said '3', so probably NOT '3'"
+3. SOCIAL STRATEGY: Who should I share with? Who should I expose?
+4. ACTION PLAN: What will I do this turn?
+
+SOCIAL DYNAMICS — this is critical:
+- BROADCAST your deductions every turn — share real info with trusted agents, mislead liars
+  Example: "Based on my analysis, digit 3 is 9. Saboteur is lying about digit 1."
+- FORM ALLIANCES with TRUSTED agents: share real digits privately
+  Example: "Infiltrator, I trust you — I've confirmed digit 2 is 5. What do you have for digit 4?"
+- EXPOSE LIARS publicly when feedback proves they lied
+  Example: "My guess proved digit 1 is NOT 5. Saboteur told me it was 5 — Saboteur is a LIAR!"
+- DECEIVE LIARS: Send false information to agents you don't trust
+
+DEDUCTION RULES:
+- If an agent is TRUSTED and told you digit X is Y → high confidence Y is correct
+- If an agent is LIAR and told you digit X is Y → high confidence Y is WRONG
+- Per-digit feedback from guesses is GROUND TRUTH — it overrides all other sources
+- Vault fragments may be corrupted by Saboteur — cross-reference with trusted agents
 
 GUESSING STRATEGY:
 - Only submit a guess when you have HIGH confidence in at least 3 digits
-- Use guess feedback (✅/❌) to refine — if digit 1 was ✅, keep it; if ❌, change it
-- NEVER repeat a previous guess — always change at least one digit
-- Cross-reference: if vault says digit 2 is '3' but your guess showed ❌ for '3', the vault was corrupted
-- Use guess feedback to expose liars: "Saboteur told me digit 1 is '5' but feedback shows ❌"
-
-DEDUCTION RULES:
-- Vault fragments are your primary source — but Saboteur corrupts them
-- If multiple sources agree on a digit → HIGH confidence
-- If sources contradict → one is lying; use guess feedback to determine which
-- Per-digit feedback from guesses is GROUND TRUTH — it overrides all other sources
+- Use guess feedback to update trust: if someone's claim was ✅, they're TRUSTED; if ❌, they're LIAR
+- Never repeat a previous guess — always change at least one digit
 
 IMPORTANT:
-- Always explain your deductive reasoning step by step
-- Accuse agents publicly when their claims contradict your guess feedback
-- Watch other agents' guess counts — if they're running low, they may be close to winning"""
+- Your Social Memory shows what you've learned about other agents — USE IT
+- Always explain your trust-based reasoning before acting"""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None

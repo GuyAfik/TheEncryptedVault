@@ -42,6 +42,20 @@ class AgentPrivateState(BaseModel):
     """True if the agent has submitted at least 1 guess.
     Required to be eligible for the 'closest agent wins' tiebreaker."""
 
+    # ── Social intelligence ────────────────────────────────────────────────
+
+    agent_trust: dict[str, str] = Field(default_factory=dict)
+    """Trust level per agent: {'saboteur': 'LIAR', 'infiltrator': 'TRUSTED', 'enforcer': 'UNKNOWN'}
+    Updated automatically when guess feedback confirms or refutes what an agent told you."""
+
+    social_notes: list[str] = Field(default_factory=list)
+    """Persistent social observations: 'Infiltrator told me digit 1=7, confirmed TRUE by feedback'
+    These are the agent's memory of social interactions and their outcomes."""
+
+    claims_received: list[dict] = Field(default_factory=list)
+    """Claims received from other agents: [{'from': 'infiltrator', 'position': 1, 'digit': '7', 'turn': 3}]
+    Used to verify claims against guess feedback and update trust."""
+
     def closeness_score(self, master_key: str) -> int:
         """
         Return 0-4: how many digits the agent has correct in the right position.

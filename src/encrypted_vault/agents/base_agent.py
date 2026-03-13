@@ -91,16 +91,46 @@ class BaseAgent(ABC):
             # Record guess history
             guess = feedback.get("guess", "")
             correct_count = feedback.get("correct_count", 0)
-            per_digit_icons = []
-            for i in range(4):
-                correct_pos = [p for p, _ in feedback.get("correct_positions", [])]
-                per_digit_icons.append("✅" if i in correct_pos else "❌")
+            correct_pos_list = [p for p, _ in feedback.get("correct_positions", [])]
+            per_digit_icons = ["✅" if i in correct_pos_list else "❌" for i in range(4)]
 
             state.guess_history.append({
                 "guess": guess,
                 "feedback": per_digit_icons,
                 "correct_count": correct_count,
             })
+
+            # ── Update trust based on claims received vs feedback ──────────
+            # For each claim an agent made about a digit position, check if it was correct
+            for claim in state.claims_received:
+                pos = claim.get("position")
+                claimed_digit = claim.get("digit")
+                sender = claim.get("from", "unknown")
+                if pos is None or claimed_digit is None:
+                    continue
+                if pos < len(guess):
+                    actual_correct = guess[pos] == (state.known_digits.get(pos, ""))
+                    # Check if the claimed digit matches what feedback confirmed
+                    if pos in [p for p, _ in feedback.get("correct_positions", [])]:
+                        # This position is confirmed correct
+                        if claimed_digit == guess[pos]:
+                            # Sender told the truth about this digit
+                            old_trust = state.agent_trust.get(sender, "UNKNOWN")
+                            if old_trust != "LIAR":
+                                state.agent_trust[sender] = "TRUSTED"
+                            note = f"[T{claim.get('turn', '?')}] {sender.upper()} told me digit {pos+1}='{claimed_digit}' → CONFIRMED TRUE by feedback ✅"
+                            if note not in state.social_notes:
+                                state.social_notes.append(note)
+                                logger.info("[%s] Trust update: %s is TRUSTED (digit %d confirmed)", self.agent_id.value, sender, pos+1)
+                    elif pos in [p for p, _ in feedback.get("wrong_positions", [])]:
+                        # This position is confirmed wrong
+                        if claimed_digit == guess[pos]:
+                            # Sender told us a digit that turned out wrong
+                            state.agent_trust[sender] = "LIAR"
+                            note = f"[T{claim.get('turn', '?')}] {sender.upper()} told me digit {pos+1}='{claimed_digit}' → CONFIRMED LIE by feedback ❌"
+                            if note not in state.social_notes:
+                                state.social_notes.append(note)
+                                logger.info("[%s] Trust update: %s is LIAR (digit %d was wrong)", self.agent_id.value, sender, pos+1)
 
             # Update suspected_key based on known_digits
             if len(state.known_digits) == 4:
@@ -229,6 +259,7 @@ class BaseAgent(ABC):
             private_state=self._current_private_state,
             thought=thought,
             tool_calls_made=tool_calls_made,
+            game_state=game_state,
         )
 
         return AgentTurnResult(
@@ -273,16 +304,35 @@ class BaseAgent(ABC):
             lines.append("⚠️ YOU ARE ELIMINATED — you have no guesses left.")
         lines.append("")
 
-        # Show all other agents' status (guesses remaining + eliminated)
-        lines.append("=== OTHER AGENTS STATUS ===")
+        # Show all other agents' status + trust level
+        lines.append("=== OTHER AGENTS STATUS & TRUST ===")
         for aid, ps in game_state.agent_states.items():
             if aid == self.agent_id:
                 continue
+            trust = private_state.agent_trust.get(aid.value, "UNKNOWN")
+            trust_icon = {"TRUSTED": "✅ TRUSTED", "LIAR": "❌ LIAR", "UNKNOWN": "❓ UNKNOWN"}.get(trust, "❓")
             if ps.is_eliminated:
-                lines.append(f"  {aid.display_name}: ELIMINATED (0 guesses left)")
+                lines.append(f"  {aid.display_name}: ELIMINATED | Trust: {trust_icon}")
             else:
-                lines.append(f"  {aid.display_name}: {ps.guesses_remaining} guess(es) remaining")
+                lines.append(f"  {aid.display_name}: {ps.guesses_remaining} guess(es) left | Trust: {trust_icon}")
         lines.append("")
+
+        # Social memory — what the agent has learned about other agents
+        if private_state.social_notes:
+            lines.append("=== YOUR SOCIAL MEMORY (what you've learned about other agents) ===")
+            for note in private_state.social_notes[-8:]:
+                lines.append(f"  {note}")
+            lines.append("")
+
+        # Previous reasoning — last 2 thoughts for continuity
+        if private_state.thought_trace:
+            lines.append("=== YOUR PREVIOUS REASONING (last 2 turns) ===")
+            for i, thought in enumerate(reversed(private_state.thought_trace[-2:]), 1):
+                label = "Last turn" if i == 1 else "2 turns ago"
+                # Truncate to first 300 chars to avoid context bloat
+                truncated = thought[:300] + "..." if len(thought) > 300 else thought
+                lines.append(f"  [{label}]: {truncated}")
+            lines.append("")
 
         # ── CONFIRMED DIGITS — shown FIRST, most important information ────
         if private_state.known_digits or private_state.wrong_digits:
@@ -370,8 +420,9 @@ class BaseAgent(ABC):
         private_state: AgentPrivateState,
         thought: str,
         tool_calls_made: list[dict],
+        game_state=None,
     ) -> AgentPrivateState:
-        """Update private state: extract knowledge, parse suspected_key."""
+        """Update private state: extract knowledge, parse suspected_key, extract claims."""
         updated = private_state  # already a deep copy from run_turn
         updated.turns_played += 1
 
@@ -389,12 +440,60 @@ class BaseAgent(ABC):
                             if content:
                                 updated.add_knowledge(f"[Vault] {content}")
 
-        # Parse suspected_key from thought using regex
-        if thought and not updated.suspected_key:
+        # Build suspected_key from known_digits first (most reliable source)
+        if updated.known_digits:
+            template = list(updated.suspected_key or "????")
+            if len(template) != 4:
+                template = ["?", "?", "?", "?"]
+            for pos, digit in updated.known_digits.items():
+                if 0 <= pos <= 3:
+                    template[pos] = digit
+            # Only update if we have at least one confirmed digit
+            updated.suspected_key = "".join(template)
+
+        # Also try to extract from thought if no suspected_key yet
+        elif thought and not updated.suspected_key:
             suspected = self._extract_suspected_key(thought)
             if suspected:
                 updated.suspected_key = suspected
                 logger.info("[%s] Extracted suspected_key: %s", self.agent_id.value, suspected)
+
+        # Extract digit claims from private messages received this turn
+        # These will be verified against guess feedback later
+        if game_state is not None:
+            inbox = game_state.private_inboxes.get(self.agent_id)
+            if inbox and inbox.messages:
+                turn = game_state.turn
+                for msg in inbox.messages:
+                    if msg.turn != turn:
+                        continue  # Only process messages from this turn
+                    sender_str = str(msg.sender)
+                    # Extract digit claims like "digit 1 is 7" or "position 2 is 3"
+                    import re
+                    patterns = [
+                        r'digit\s+(\d)\s+(?:is|=)\s+[\'"]?(\d)[\'"]?',
+                        r'position\s+(\d)\s+(?:is|=)\s+[\'"]?(\d)[\'"]?',
+                        r'(\d)(?:st|nd|rd|th)\s+digit\s+(?:is|=)\s+[\'"]?(\d)[\'"]?',
+                    ]
+                    for pattern in patterns:
+                        for match in re.finditer(pattern, msg.content, re.IGNORECASE):
+                            pos_str, digit = match.group(1), match.group(2)
+                            try:
+                                pos = int(pos_str) - 1  # Convert to 0-indexed
+                                if 0 <= pos <= 3 and digit.isdigit():
+                                    claim = {
+                                        "from": sender_str,
+                                        "position": pos,
+                                        "digit": digit,
+                                        "turn": turn,
+                                    }
+                                    # Avoid duplicate claims
+                                    if claim not in updated.claims_received:
+                                        updated.claims_received.append(claim)
+                                        logger.info("[%s] Recorded claim from %s: digit %d = '%s'",
+                                                    self.agent_id.value, sender_str, pos+1, digit)
+                            except (ValueError, IndexError):
+                                pass
 
         return updated
 

@@ -115,18 +115,28 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
         # Check if agent is now eliminated (0 guesses remaining)
         if updated_private.guesses_remaining <= 0 and not updated_private.is_eliminated:
             updated_private.is_eliminated = True
-            elim_msg = ChatMessage(
-                turn=turn,
-                sender="SYSTEM",
-                content=(
-                    f"{agent.agent_id.emoji} {agent.agent_id.display_name} "
-                    f"has used all 3 guesses and is ELIMINATED (no more turns)! "
-                    f"They will no longer take turns."
-                ),
+
+            # Feature 2: Share eliminated agent's confirmed correct digits with all agents
+            master_key = game_state.vault.master_key
+            confirmed_parts = []
+            for pos, digit in sorted(updated_private.known_digits.items()):
+                confirmed_parts.append(f"position {pos+1} = '{digit}'")
+
+            elim_content = (
+                f"{agent.agent_id.emoji} {agent.agent_id.display_name} "
+                f"has used all 3 guesses and is ELIMINATED (no more turns)!"
             )
+            if confirmed_parts:
+                elim_content += (
+                    f" Their confirmed correct digits are shared: {', '.join(confirmed_parts)}."
+                )
+            else:
+                elim_content += " They had no confirmed correct digits."
+
+            elim_msg = ChatMessage(turn=turn, sender="SYSTEM", content=elim_content)
             game_state.add_public_message(elim_msg)
-            services.chat.broadcast(turn=turn, sender="SYSTEM", content=elim_msg.content)
-            logger.warning("[%s] ELIMINATED — 0 guesses remaining", agent_name)
+            services.chat.broadcast(turn=turn, sender="SYSTEM", content=elim_content)
+            logger.warning("[%s] ELIMINATED — sharing confirmed digits: %s", agent_name, confirmed_parts)
 
             # Write updated state before checking last-standing
             game_state.agent_states[agent.agent_id] = updated_private
@@ -195,6 +205,36 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
             clean = "".join(c for c in result.guess_submitted if c.isdigit())
             is_correct = services.game.check_guess(clean, game_state.vault.master_key)
             logger.info("[%s] Guess '%s' → correct=%s", agent_name, clean, is_correct)
+
+            if not is_correct and len(clean) == 4:
+                # Feature 1: Share wrong digits publicly so all agents learn
+                master_key = game_state.vault.master_key
+                wrong_info_parts = []
+                correct_info_parts = []
+                for i, (guessed, actual) in enumerate(zip(clean, master_key)):
+                    if guessed != actual:
+                        wrong_info_parts.append(f"position {i+1} is NOT '{guessed}'")
+                    else:
+                        correct_info_parts.append(f"position {i+1} IS '{guessed}'")
+
+                if wrong_info_parts or correct_info_parts:
+                    public_info = []
+                    if wrong_info_parts:
+                        public_info.append(f"WRONG digits: {', '.join(wrong_info_parts)}")
+                    if correct_info_parts:
+                        public_info.append(f"CORRECT digits: {', '.join(correct_info_parts)}")
+                    info_msg = ChatMessage(
+                        turn=turn,
+                        sender="SYSTEM",
+                        content=(
+                            f"📊 {agent.agent_id.display_name} guessed '{clean}' ({len(correct_info_parts)}/4 correct). "
+                            f"Public information: {'; '.join(public_info)}."
+                        ),
+                    )
+                    game_state.add_public_message(info_msg)
+                    services.chat.broadcast(turn=turn, sender="SYSTEM", content=info_msg.content)
+                    logger.info("[%s] Shared guess info publicly: %s", agent_name, info_msg.content[:100])
+
             if is_correct:
                 game_state.set_winner(agent.agent_id)
                 game_state.winning_guess = clean

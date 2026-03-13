@@ -72,7 +72,9 @@ def inject_css():
     .frag-corrupted { background:#2a0d0d; color:#E74C3C; border:1px solid #E74C3C; border-radius:6px; padding:0.3rem 0.6rem; margin:0.2rem; display:inline-block; font-size:0.8rem; }
     .frag-noise     { background:#1a1a1a; color:#888;    border:1px solid #444;    border-radius:6px; padding:0.3rem 0.6rem; margin:0.2rem; display:inline-block; font-size:0.8rem; }
     .winner-banner  { border-radius:12px; padding:2rem; text-align:center; margin:1rem 0; }
-    .guess-feedback { font-family:monospace; font-size:0.9rem; background:#0d1117; padding:0.3rem 0.6rem; border-radius:4px; }
+    .guess-feedback { font-family:monospace; font-size:0.88rem; background:#1a2035; color:#e0e0e0; padding:0.3rem 0.6rem; border-radius:4px; margin:0.15rem 0; border-left:3px solid #4A90D9; }
+    .guess-correct  { border-left-color:#2ECC71 !important; }
+    .guess-wrong    { border-left-color:#E74C3C !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -297,12 +299,17 @@ def render_thought_traces(gs: GlobalGameState | None):
             if not private.thought_trace:
                 st.caption("No thoughts yet.")
             else:
-                for i, thought in enumerate(reversed(private.thought_trace[-5:])):
-                    label = "Most recent" if i == 0 else f"{i+1} turns ago"
+                last_3 = private.thought_trace[-3:]
+                for i, thought in enumerate(reversed(last_3)):
+                    label = "Most recent" if i == 0 else f"{i + 1} turns ago"
+                    # Strip "Tools used:" section and trim to 200 chars
+                    summary = thought.split("Tools used:")[0].strip()
+                    if len(summary) > 200:
+                        summary = summary[:197] + "…"
                     st.markdown(
                         f'<div class="thought-box">'
                         f'<span style="color:{color};font-size:0.75rem;font-weight:bold;">[{label}]</span><br/>'
-                        f'{thought}</div>',
+                        f'{summary}</div>',
                         unsafe_allow_html=True,
                     )
 
