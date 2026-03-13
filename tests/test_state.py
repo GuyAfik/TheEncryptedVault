@@ -30,9 +30,9 @@ class TestAgentPrivateState:
         state = AgentPrivateState(agent_id=AgentID.SCHOLAR, suspected_key="73")
         assert state.closeness_score("7392") == 0
 
-    def test_is_budget_exhausted(self):
-        state = AgentPrivateState(agent_id=AgentID.SCHOLAR, tokens_used=8000, token_budget=8000)
-        assert state.is_budget_exhausted is True
+    def test_is_eliminated_when_no_guesses(self):
+        state = AgentPrivateState(agent_id=AgentID.SCHOLAR, guesses_remaining=0, is_eliminated=True)
+        assert state.is_eliminated is True
 
     def test_add_thought(self):
         state = AgentPrivateState(agent_id=AgentID.SCHOLAR)
@@ -142,11 +142,12 @@ class TestGlobalGameState:
         assert state.status == GameStatus.AGENT_WIN
         assert state.is_game_over is True
 
-    def test_set_winner_system(self):
+    def test_set_winner_closest_agent(self):
+        """After turn limit, closest agent wins — always an AgentID, never 'SYSTEM'."""
         state = self._make_state()
-        state.set_winner("SYSTEM")
-        assert state.winner == "SYSTEM"
-        assert state.status == GameStatus.SYSTEM_WIN
+        state.set_winner(AgentID.INFILTRATOR)
+        assert state.winner == AgentID.INFILTRATOR
+        assert state.status == GameStatus.AGENT_WIN
 
     def test_serialisation_roundtrip(self):
         state = self._make_state()

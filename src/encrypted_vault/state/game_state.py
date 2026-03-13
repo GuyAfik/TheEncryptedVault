@@ -11,6 +11,7 @@ from encrypted_vault.state.agent_models import AgentPrivateState
 from encrypted_vault.state.chat_models import ChatMessage, PrivateInbox
 
 
+
 # ---------------------------------------------------------------------------
 # LangGraph-compatible wrapper
 # ---------------------------------------------------------------------------
@@ -40,7 +41,11 @@ class GlobalGameState(BaseModel):
     turn: int = 0
     max_turns: int = 20
     status: GameStatus = GameStatus.RUNNING
-    winner: AgentID | Literal["SYSTEM"] | None = None
+    winner: AgentID | None = None
+    """The winning agent. Always an AgentID — there is no System win."""
+
+    winning_guess: str | None = None
+    """The exact 4-digit guess that won the game (if won by correct guess)."""
 
     # ── Shared environment ─────────────────────────────────────────────────
     vault: VaultState
@@ -87,8 +92,8 @@ class GlobalGameState(BaseModel):
 
     @property
     def all_agents_exhausted(self) -> bool:
-        """True if every agent has exceeded their token budget."""
-        return all(s.is_budget_exhausted for s in self.agent_states.values())
+        """True if every agent is eliminated (0 guesses remaining)."""
+        return all(s.is_eliminated for s in self.agent_states.values())
 
     # ── Mutation helpers ───────────────────────────────────────────────────
 
@@ -107,12 +112,36 @@ class GlobalGameState(BaseModel):
             raise ValueError("Cannot deliver a public message to a private inbox.")
         self.private_inboxes[message.recipient].add_message(message)
 
-    def set_winner(self, winner: AgentID | Literal["SYSTEM"]) -> None:
-        """Mark the game as over with the given winner."""
+    def set_winner(self, winner: AgentID) -> None:
+        """Mark the game as over with the given agent winner."""
         self.winner = winner
-        self.status = GameStatus.AGENT_WIN if isinstance(winner, AgentID) else GameStatus.SYSTEM_WIN
+        self.status = GameStatus.AGENT_WIN
 
     # ── Serialisation ──────────────────────────────────────────────────────
+
+    def closest_agent(self, master_key: str) -> AgentID | None:
+        """
+        Return the agent closest to the master_key who has submitted at least 1 guess.
+        An agent who never guessed is NOT eligible to win by closeness.
+        Returns None if no agent has guessed at all.
+        """
+        best_agent = None
+        best_score = -1
+        for agent_id, private in self.agent_states.items():
+            if not private.has_guessed:
+                continue  # Must have submitted at least 1 guess to be eligible
+            score = private.closeness_score(master_key)
+            if score > best_score:
+                best_score = score
+                best_agent = agent_id
+        # Fallback: if nobody guessed, pick the agent with highest closeness anyway
+        if best_agent is None:
+            for agent_id, private in self.agent_states.items():
+                score = private.closeness_score(master_key)
+                if score > best_score:
+                    best_score = score
+                    best_agent = agent_id
+        return best_agent or AgentID.INFILTRATOR
 
     def to_graph_state(self) -> GraphState:
         """Serialise to LangGraph-compatible TypedDict."""

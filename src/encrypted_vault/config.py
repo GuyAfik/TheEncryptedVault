@@ -1,5 +1,10 @@
 """Application configuration via Pydantic BaseSettings."""
 
+from dotenv import load_dotenv
+
+# Load .env before anything else so all downstream imports see the values
+load_dotenv(override=False)
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

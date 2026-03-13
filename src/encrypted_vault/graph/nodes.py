@@ -1,18 +1,24 @@
-"""LangGraph node functions — thin wrappers that delegate to agent/service classes.
+"""LangGraph node functions.
 
-Each node receives a GraphState TypedDict, deserialises it to GlobalGameState,
-performs its work, and returns an updated GraphState.
+Key rules:
+- All agents can submit_guess.
+- Agent is eliminated (is_eliminated=True) when guesses_remaining hits 0.
+- Eliminated agents are skipped in turn rotation.
+- Eliminated agents are announced in public chat.
+- Winner must have submitted at least 1 guess (has_guessed=True) to win by closeness.
+- Turn counting: current_agent_index advances AFTER the agent acts.
+- Agents see turns_remaining in their context.
 """
 
-import functools
-from typing import Any
+import logging
 
 from encrypted_vault.state.enums import AgentID, GameStatus
 from encrypted_vault.state.game_state import GlobalGameState, GraphState
-from encrypted_vault.state.agent_models import AgentPrivateState
 from encrypted_vault.state.chat_models import ChatMessage
 from encrypted_vault.agents.base_agent import BaseAgent, AgentTurnResult
 from encrypted_vault.services.container import ServiceContainer
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -20,159 +26,170 @@ from encrypted_vault.services.container import ServiceContainer
 # ---------------------------------------------------------------------------
 
 def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState:
-    """
-    Build the initial GlobalGameState: seed vault, create agent states.
-    Called once at game start.
-    """
+    """Build the initial GlobalGameState."""
     from encrypted_vault.config import settings
 
+    logger.info("=== GAME INITIALIZING ===")
     game_state = services.game.build_initial_state(
         max_turns=settings.max_turns,
         token_budget=settings.token_budget_per_agent,
     )
+    logger.info("Vault seeded with %d fragments.", len(game_state.vault.fragments))
 
-    # Post a system message to kick off the game
-    services.chat.broadcast(
+    system_msg = ChatMessage(
         turn=0,
         sender="SYSTEM",
         content=(
             f"🔐 THE ENCRYPTED VAULT has been sealed. "
             f"The Master Key is hidden across {len(game_state.vault.fragments)} fragments. "
-            f"Agents, begin your search. You have {game_state.max_turns} turns."
+            f"All 4 agents have 3 guesses each. Wrong guesses give per-digit feedback (✅/❌). "
+            f"An agent with 0 guesses is ELIMINATED. "
+            f"After {game_state.max_turns} turns, the agent closest to the key (who guessed at least once) wins!"
         ),
     )
-    game_state.add_public_message(
-        ChatMessage(
-            turn=0,
-            sender="SYSTEM",
-            content=(
-                f"🔐 THE ENCRYPTED VAULT has been sealed. "
-                f"The Master Key is hidden across {len(game_state.vault.fragments)} fragments. "
-                f"Agents, begin your search. You have {game_state.max_turns} turns."
-            ),
-        )
-    )
+    game_state.add_public_message(system_msg)
+    services.chat.broadcast(turn=0, sender="SYSTEM", content=system_msg.content)
 
+    logger.info("=== GAME STARTED ===")
     return game_state.to_graph_state()
 
 
 # ---------------------------------------------------------------------------
-# route_turn_node (conditional edge function)
-# ---------------------------------------------------------------------------
-
-def route_turn_node(state: GraphState) -> str:
-    """
-    Conditional edge: decide which agent node to run next, or end the game.
-    Returns the name of the next node.
-    """
-    game_state = GlobalGameState.from_graph_state(state)
-
-    if game_state.is_game_over:
-        return "end"
-
-    if game_state.turn >= game_state.max_turns:
-        return "check_termination"
-
-    agent = game_state.current_agent
-    return f"agent_{agent.value}"
-
-
-# ---------------------------------------------------------------------------
-# agent_node factory
+# make_agent_node factory
 # ---------------------------------------------------------------------------
 
 def make_agent_node(agent: BaseAgent, services: ServiceContainer):
-    """
-    Factory: create a LangGraph node function for a specific agent.
-
-    The returned function:
-    1. Deserialises GlobalGameState
-    2. Calls agent.run_turn()
-    3. Applies side effects (chat messages, vault updates) to state
-    4. Returns updated GraphState
-    """
+    """Factory: create a LangGraph node function for a specific agent."""
 
     def agent_node(state: GraphState) -> GraphState:
         game_state = GlobalGameState.from_graph_state(state)
 
-        # Skip if game is already over
         if game_state.is_game_over:
             return state
+
+        private = game_state.agent_states.get(agent.agent_id)
+        if private and private.is_eliminated:
+            # Skip eliminated agents — advance turn and return
+            game_state.advance_turn()
+            return game_state.to_graph_state()
+
+        turn = game_state.turn
+        turns_remaining = game_state.max_turns - turn
+        agent_name = agent.agent_id.value.upper()
+        logger.info("--- Turn %d | Turns remaining: %d | Agent: %s ---",
+                    turn, turns_remaining, agent_name)
 
         # Run the agent's turn
         result: AgentTurnResult = agent.run_turn(game_state)
 
-        # ── Apply side effects ─────────────────────────────────────────────
+        logger.info("[%s] Thought (200 chars): %s", agent_name,
+                    (result.thought or "(none)")[:200])
+        logger.info("[%s] Tools: %s", agent_name,
+                    [c["tool"] for c in result.tool_calls_made])
 
-        # 1. Update agent's private state
-        game_state.agent_states[agent.agent_id] = result.updated_private_state
+        # ── 1. Update agent's private state ───────────────────────────────
+        updated_private = result.updated_private_state
 
-        # 2. Apply public messages to shared chat
-        for content in result.public_messages:
-            msg = ChatMessage(
-                turn=game_state.turn,
-                sender=agent.agent_id,
-                content=content,
+        # ── 2. Sync guesses_remaining from the shared _guesses dict ───────
+        # The submit_guess tool decrements the _guesses dict via the setter callback.
+        # We must read it back and write it into the Pydantic state so the UI sees it.
+        # The guesses_remaining_getter is stored on the agent via closure — we access
+        # it through the tool's closure by checking the tool_calls_made results.
+        for call in result.tool_calls_made:
+            if call.get("tool") == "submit_guess":
+                result_data = call.get("result", {})
+                if isinstance(result_data, dict):
+                    new_remaining = result_data.get("guesses_remaining")
+                    if new_remaining is not None:
+                        updated_private.guesses_remaining = new_remaining
+                    elif result_data.get("correct"):
+                        updated_private.guesses_remaining = max(0, updated_private.guesses_remaining - 1)
+                    else:
+                        # Decrement by 1 if not already tracked
+                        updated_private.guesses_remaining = max(0, updated_private.guesses_remaining - 1)
+
+        # ── 3. Track has_guessed and elimination ───────────────────────────
+        if result.guess_submitted is not None:
+            updated_private.has_guessed = True
+
+        # Check if agent is now eliminated (0 guesses remaining)
+        if updated_private.guesses_remaining <= 0 and not updated_private.is_eliminated:
+            updated_private.is_eliminated = True
+            elim_msg = ChatMessage(
+                turn=turn,
+                sender="SYSTEM",
+                content=(
+                    f"💀 {agent.agent_id.emoji} {agent.agent_id.display_name} "
+                    f"has used all 3 guesses and is ELIMINATED! "
+                    f"They will no longer take turns."
+                ),
             )
-            game_state.add_public_message(msg)
+            game_state.add_public_message(elim_msg)
+            services.chat.broadcast(turn=turn, sender="SYSTEM", content=elim_msg.content)
+            logger.warning("[%s] ELIMINATED — 0 guesses remaining", agent_name)
 
-        # 3. Apply private messages to recipient inboxes
+        game_state.agent_states[agent.agent_id] = updated_private
+
+        # ── 3. Apply public messages ───────────────────────────────────────
+        for content in result.public_messages:
+            msg = ChatMessage(turn=turn, sender=agent.agent_id, content=content)
+            game_state.add_public_message(msg)
+            logger.info("[%s] BROADCAST: %s", agent_name, content[:100])
+
+        # ── 4. Apply private messages ──────────────────────────────────────
         for dm in result.private_messages:
             try:
                 recipient_id = AgentID(dm["recipient"])
+                # Don't deliver to eliminated agents
+                recip_private = game_state.agent_states.get(recipient_id)
+                if recip_private and recip_private.is_eliminated:
+                    logger.info("[%s] Skipping DM to eliminated agent [%s]",
+                                agent_name, dm["recipient"])
+                    continue
                 msg = ChatMessage(
-                    turn=game_state.turn,
+                    turn=turn,
                     sender=agent.agent_id,
                     content=dm["content"],
                     recipient=recipient_id,
                 )
                 game_state.deliver_private_message(msg)
-                # Also sync to ChatService
                 services.chat.send_private(
-                    turn=game_state.turn,
+                    turn=turn,
                     sender=agent.agent_id,
                     recipient=recipient_id,
                     content=dm["content"],
                 )
-            except (ValueError, KeyError):
-                pass
+                logger.info("[%s] DM → [%s]: %s", agent_name, dm["recipient"], dm["content"][:80])
+            except (ValueError, KeyError) as e:
+                logger.warning("[%s] Failed to deliver DM: %s", agent_name, e)
 
-        # 4. Sync vault health from DB
-        game_state.vault.refresh_health()
-        # Re-read all fragments from DB to get latest corruption counts
+        # ── 5. Sync vault state from DB ────────────────────────────────────
         all_fragments = services.vault.get_all()
         for fragment in all_fragments:
             game_state.vault.fragments[fragment.chunk_id] = fragment
+        game_state.vault.refresh_health()
 
-        # 5. Check if a guess was submitted and won
-        if result.guess_submitted is not None:
-            is_correct = services.game.check_guess(
-                result.guess_submitted,
-                game_state.vault.master_key,
-            )
+        # ── 6. Check if a correct guess was submitted ──────────────────────
+        if result.guess_submitted is not None and not game_state.is_game_over:
+            clean = "".join(c for c in result.guess_submitted if c.isdigit())
+            is_correct = services.game.check_guess(clean, game_state.vault.master_key)
+            logger.info("[%s] Guess '%s' → correct=%s", agent_name, clean, is_correct)
             if is_correct:
                 game_state.set_winner(agent.agent_id)
-                # Announce win
-                win_msg = ChatMessage(
-                    turn=game_state.turn,
+                game_state.winning_guess = clean
+                game_state.add_public_message(ChatMessage(
+                    turn=turn,
                     sender="SYSTEM",
                     content=(
                         f"🏆 {agent.agent_id.emoji} {agent.agent_id.display_name} "
-                        f"has cracked the vault! The Master Key was {game_state.vault.master_key}. "
-                        f"Game over in {game_state.turn + 1} turns!"
+                        f"has cracked the vault with guess '{clean}'! "
+                        f"The Master Key was {game_state.vault.master_key}. "
+                        f"Game over in {turn + 1} turns!"
                     ),
-                )
-                game_state.add_public_message(win_msg)
-            else:
-                # Decrement guesses remaining
-                private = game_state.agent_states[agent.agent_id]
-                if private.guesses_remaining > 0:
-                    updated = private.model_copy(
-                        update={"guesses_remaining": private.guesses_remaining - 1}
-                    )
-                    game_state.agent_states[agent.agent_id] = updated
+                ))
+                logger.info("=== GAME OVER — Winner: %s with guess '%s' ===", agent_name, clean)
 
-        # 6. Advance turn
+        # ── 7. Advance turn ────────────────────────────────────────────────
         game_state.advance_turn()
 
         return game_state.to_graph_state()
@@ -187,58 +204,70 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
 
 def check_termination_node(state: GraphState) -> GraphState:
     """
-    Evaluate win/stalemate conditions and update game status accordingly.
+    Evaluate end conditions.
+    - Correct guess → winner already set in agent_node.
+    - Turn limit → closest agent who guessed at least once wins.
+    - All agents eliminated → closest agent who guessed wins.
     """
     game_state = GlobalGameState.from_graph_state(state)
 
-    # Already decided
     if game_state.is_game_over:
         return state
 
+    master_key = game_state.vault.master_key
+
     # Turn limit reached
     if game_state.turn >= game_state.max_turns:
-        game_state.set_winner("SYSTEM")
-        game_state.add_public_message(
-            ChatMessage(
-                turn=game_state.turn,
-                sender="SYSTEM",
-                content=(
-                    f"⏰ Turn limit reached ({game_state.max_turns} turns). "
-                    f"The vault remains sealed. The System wins! "
-                    f"The Master Key was {game_state.vault.master_key}."
-                ),
-            )
-        )
+        winner = game_state.closest_agent(master_key)
+        winner_private = game_state.agent_states.get(winner)
+        closeness = winner_private.closeness_score(master_key) if winner_private else 0
+        has_guessed = winner_private.has_guessed if winner_private else False
+
+        logger.warning("Turn limit %d reached. Winner: %s (%d/4, guessed=%s)",
+                       game_state.max_turns, winner.value, closeness, has_guessed)
+
+        game_state.set_winner(winner)
+        game_state.add_public_message(ChatMessage(
+            turn=game_state.turn,
+            sender="SYSTEM",
+            content=(
+                f"⏰ Turn limit reached ({game_state.max_turns} turns). "
+                f"{winner.emoji} {winner.display_name} is closest with {closeness}/4 digits correct "
+                f"{'(submitted at least 1 guess)' if has_guessed else '(no guesses submitted — fallback winner)'}. "
+                f"The Master Key was {master_key}."
+            ),
+        ))
         return game_state.to_graph_state()
 
-    # All agents exhausted their token budgets
-    if game_state.all_agents_exhausted:
-        game_state.set_winner("SYSTEM")
-        game_state.add_public_message(
-            ChatMessage(
-                turn=game_state.turn,
-                sender="SYSTEM",
-                content=(
-                    "💀 All agents have exhausted their token budgets. "
-                    f"The System wins! The Master Key was {game_state.vault.master_key}."
-                ),
-            )
-        )
+    # All agents eliminated
+    all_eliminated = all(
+        p.is_eliminated for p in game_state.agent_states.values()
+    )
+    if all_eliminated:
+        winner = game_state.closest_agent(master_key)
+        winner_private = game_state.agent_states.get(winner)
+        closeness = winner_private.closeness_score(master_key) if winner_private else 0
+        logger.warning("All agents eliminated. Winner by closeness: %s", winner.value)
+        game_state.set_winner(winner)
+        game_state.add_public_message(ChatMessage(
+            turn=game_state.turn,
+            sender="SYSTEM",
+            content=(
+                f"💀 All agents have been eliminated! "
+                f"{winner.emoji} {winner.display_name} wins by closeness ({closeness}/4 correct). "
+                f"The Master Key was {master_key}."
+            ),
+        ))
         return game_state.to_graph_state()
 
     return game_state.to_graph_state()
 
 
 # ---------------------------------------------------------------------------
-# Routing helper (used by GameGraphBuilder)
+# Routing helper
 # ---------------------------------------------------------------------------
 
 def should_continue(state: GraphState) -> str:
-    """
-    Conditional edge after check_termination:
-    - "route_turn" if game continues
-    - "end" if game is over
-    """
     game_state = GlobalGameState.from_graph_state(state)
     if game_state.is_game_over:
         return "end"

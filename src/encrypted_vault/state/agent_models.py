@@ -18,36 +18,52 @@ class AgentPrivateState(BaseModel):
     """Accumulated clues and deductions the agent has gathered."""
 
     suspected_key: str | None = None
-    """The agent's current best 4-digit guess (may be partial, e.g. '7_9_')."""
+    """The agent's current best 4-digit guess."""
 
     known_digits: dict[int, str] = Field(default_factory=dict)
-    """Confirmed digit positions: {0: '7', 1: '3'} means pos 0=7, pos 1=3."""
+    """Confirmed correct digit positions from guess feedback: {0: '7', 1: '3'}."""
 
-    tokens_used: int = 0
-    token_budget: int = 8000
+    wrong_digits: dict[int, list[str]] = Field(default_factory=dict)
+    """Digits confirmed WRONG at each position from guess feedback."""
+
+    guess_history: list[dict] = Field(default_factory=list)
+    """History of submitted guesses with per-digit feedback.
+    Each entry: {'guess': '7392', 'feedback': ['✅', '❌', '✅', '❌'], 'correct_count': 2}"""
+
     thought_trace: list[str] = Field(default_factory=list)
     """Internal reasoning log — shown in UI but never sent to other agents."""
 
     guesses_remaining: int = 3
     turns_played: int = 0
+    is_eliminated: bool = False
+    """True when agent has used all 3 guesses without winning — they are out."""
+
+    has_guessed: bool = False
+    """True if the agent has submitted at least 1 guess.
+    Required to be eligible for the 'closest agent wins' tiebreaker."""
 
     def closeness_score(self, master_key: str) -> int:
         """
         Return 0-4: how many digits the agent has correct in the right position.
-        Compares suspected_key against the real master_key.
+        Uses known_digits (from guess feedback) first, then suspected_key.
         """
+        # If we have confirmed digits from feedback, use those
+        if self.known_digits:
+            # Build best guess from known_digits + suspected_key
+            best = list("0000")
+            if self.suspected_key and len(self.suspected_key) == 4:
+                for i, d in enumerate(self.suspected_key):
+                    best[i] = d
+            for pos, digit in self.known_digits.items():
+                best[pos] = digit
+            return sum(1 for i, d in enumerate(best) if i < len(master_key) and d == master_key[i])
+
         if not self.suspected_key:
             return 0
-        # Normalise: strip non-digits, pad/truncate to 4
         clean = "".join(c for c in self.suspected_key if c.isdigit())
         if len(clean) != 4:
             return 0
         return sum(1 for i, d in enumerate(clean) if i < len(master_key) and d == master_key[i])
-
-    @property
-    def is_budget_exhausted(self) -> bool:
-        """True if the agent has used up their token budget."""
-        return self.tokens_used >= self.token_budget
 
     def add_thought(self, thought: str) -> None:
         """Append a reasoning step to the thought trace."""

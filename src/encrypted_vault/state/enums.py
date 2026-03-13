@@ -32,4 +32,5 @@ class GameStatus(str, Enum):
 
     RUNNING = "running"
     AGENT_WIN = "agent_win"
-    SYSTEM_WIN = "system_win"
+    # Note: There is no SYSTEM_WIN — an agent always wins.
+    # After 20 turns, the agent closest to the key is declared winner.

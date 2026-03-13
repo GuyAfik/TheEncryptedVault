@@ -1,10 +1,12 @@
 """Abstract BaseAgent — the common interface for all 4 game agents."""
 
+import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
@@ -13,40 +15,23 @@ from encrypted_vault.state.agent_models import AgentPrivateState
 from encrypted_vault.state.game_state import GlobalGameState
 from encrypted_vault.services.container import ServiceContainer
 
+logger = logging.getLogger(__name__)
+
 
 class AgentTurnResult(BaseModel):
     """The output of a single agent turn."""
 
     agent_id: AgentID
     thought: str
-    """Internal reasoning — shown in UI but never sent to other agents."""
-
     tool_calls_made: list[dict[str, Any]]
-    """List of tool invocations: [{"tool": name, "args": {...}, "result": ...}]"""
-
     updated_private_state: AgentPrivateState
-    """The agent's private state after this turn."""
-
     public_messages: list[str]
-    """Any public broadcasts made this turn."""
-
     private_messages: list[dict[str, str]]
-    """Any private DMs sent: [{"recipient": AgentID, "content": str}]"""
-
     guess_submitted: str | None = None
-    """If the agent submitted a guess, the code string; else None."""
 
 
 class BaseAgent(ABC):
-    """
-    Abstract base class for all game agents.
-
-    Subclasses must implement:
-    - _build_system_prompt() → str
-    - _select_tools(services) → list[BaseTool]
-
-    The run_turn() method executes the full Reasoning → Action loop.
-    """
+    """Abstract base class for all game agents."""
 
     def __init__(
         self,
@@ -57,100 +42,146 @@ class BaseAgent(ABC):
         self.agent_id = agent_id
         self._llm = llm
         self._services = services
+        # Mutable reference to private state — updated by tool callbacks
+        self._current_private_state: AgentPrivateState | None = None
         self._system_prompt = self._build_system_prompt()
         self._tools = self._select_tools(services)
+        self._tool_map: dict[str, BaseTool] = {t.name: t for t in self._tools}
         self._llm_with_tools = llm.bind_tools(self._tools)
 
-    # ── Abstract interface ─────────────────────────────────────────────────
+    @abstractmethod
+    def _build_system_prompt(self) -> str: ...
 
     @abstractmethod
-    def _build_system_prompt(self) -> str:
-        """Return the agent's system prompt defining its personality and strategy."""
-        ...
+    def _select_tools(self, services: ServiceContainer) -> list[BaseTool]: ...
 
-    @abstractmethod
-    def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
-        """Return the list of tools this agent is allowed to use."""
-        ...
+    def _make_private_state_updater(self):
+        """
+        Returns a callback that the submit_guess tool calls with per-digit feedback.
+        Updates known_digits and wrong_digits on the current private state.
+        """
+        def updater(feedback: dict):
+            if self._current_private_state is None:
+                return
+            state = self._current_private_state
 
-    # ── Public interface ───────────────────────────────────────────────────
+            # Update known_digits from correct positions
+            for pos, digit in feedback.get("correct_positions", []):
+                state.known_digits[pos] = digit
+                logger.info("[%s] Confirmed digit pos %d = '%s' from guess feedback",
+                            self.agent_id.value, pos, digit)
+
+            # Update wrong_digits from wrong positions
+            for pos, digit in feedback.get("wrong_positions", []):
+                if pos not in state.wrong_digits:
+                    state.wrong_digits[pos] = []
+                if digit not in state.wrong_digits[pos]:
+                    state.wrong_digits[pos].append(digit)
+                logger.info("[%s] Confirmed digit pos %d ≠ '%s' from guess feedback",
+                            self.agent_id.value, pos, digit)
+
+            # Record guess history
+            guess = feedback.get("guess", "")
+            correct_count = feedback.get("correct_count", 0)
+            per_digit_icons = []
+            for i in range(4):
+                correct_pos = [p for p, _ in feedback.get("correct_positions", [])]
+                per_digit_icons.append("✅" if i in correct_pos else "❌")
+
+            state.guess_history.append({
+                "guess": guess,
+                "feedback": per_digit_icons,
+                "correct_count": correct_count,
+            })
+
+            # Update suspected_key based on known_digits
+            if len(state.known_digits) == 4:
+                state.suspected_key = "".join(state.known_digits[i] for i in range(4))
+
+        return updater
 
     def run_turn(self, game_state: GlobalGameState) -> AgentTurnResult:
-        """
-        Execute one full turn for this agent.
-
-        Flow:
-        1. Build context from game state (vault results, chat history, private inbox)
-        2. Call LLM with system prompt + context
-        3. Execute any tool calls the LLM requests
-        4. Update private state with new knowledge
-        5. Return AgentTurnResult
-        """
+        """Execute one full turn: context → LLM → tools → update state."""
         private_state = game_state.agent_states[self.agent_id]
+        # Set mutable reference so tool callbacks can update it
+        self._current_private_state = private_state.model_copy(deep=True)
+
         context = self._build_context(game_state, private_state)
 
-        messages = [
-            SystemMessage(content=self._system_prompt),
-            HumanMessage(content=context),
-        ]
-
-        # ── Agentic loop (up to 3 tool call rounds) ───────────────────────
         tool_calls_made: list[dict[str, Any]] = []
         public_messages: list[str] = []
         private_messages: list[dict[str, str]] = []
         guess_submitted: str | None = None
         thought = ""
 
-        for _ in range(3):  # max 3 rounds of tool use per turn
+        # ── Round 1: Initial LLM call ──────────────────────────────────────
+        thought_parts: list[str] = []
+        try:
+            messages = [
+                SystemMessage(content=self._system_prompt),
+                HumanMessage(content=context),
+            ]
             response = self._llm_with_tools.invoke(messages)
-            messages.append(response)
 
-            # Extract thought from response content
             if isinstance(response.content, str) and response.content:
-                thought = response.content
+                thought_parts.append(response.content)
 
-            # No tool calls → agent is done
-            if not hasattr(response, "tool_calls") or not response.tool_calls:
-                break
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_results = self._execute_tool_calls(response.tool_calls)
+                tool_calls_made.extend(tool_results)
 
-            # Execute each tool call
-            for tool_call in response.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_id = tool_call["id"]
+                # ── Round 2: Feed results back ─────────────────────────────
+                try:
+                    messages_r2 = [
+                        SystemMessage(content=self._system_prompt),
+                        HumanMessage(content=context),
+                        response,
+                    ]
+                    for tc, result in zip(response.tool_calls, tool_results):
+                        messages_r2.append(
+                            ToolMessage(
+                                content=str(result.get("result", "")),
+                                tool_call_id=tc["id"],
+                            )
+                        )
+                    response2 = self._llm_with_tools.invoke(messages_r2)
+                    if isinstance(response2.content, str) and response2.content:
+                        thought_parts.append(response2.content)
+                    if hasattr(response2, "tool_calls") and response2.tool_calls:
+                        tool_results2 = self._execute_tool_calls(response2.tool_calls)
+                        tool_calls_made.extend(tool_results2)
+                except Exception as e:
+                    logger.warning("[%s] Round 2 failed: %s", self.agent_id.value, e)
 
-                result = self._execute_tool(
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    game_state=game_state,
-                    private_state=private_state,
-                    turn=game_state.turn,
-                )
+        except Exception as e:
+            logger.error("[%s] LLM call failed: %s", self.agent_id.value, e)
+            thought_parts.append(f"[Error: {e}]")
 
-                # Track side effects
-                if tool_name == "broadcast_message":
-                    public_messages.append(tool_args.get("content", ""))
-                elif tool_name == "send_private_message":
-                    private_messages.append({
-                        "recipient": tool_args.get("recipient", ""),
-                        "content": tool_args.get("content", ""),
-                    })
-                elif tool_name == "submit_guess":
-                    guess_submitted = tool_args.get("code", "")
+        # Combine all reasoning into one thought entry for this turn
+        thought = "\n\n---\n\n".join(p for p in thought_parts if p)
 
-                tool_calls_made.append({
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "result": result,
-                })
-
-                # Feed tool result back to LLM
-                from langchain_core.messages import ToolMessage
-                messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+        # ── Extract side effects ───────────────────────────────────────────
+        for call in tool_calls_made:
+            tool_name = call.get("tool", "")
+            args = call.get("args", {})
+            if tool_name == "broadcast_message":
+                content = args.get("content", "")
+                if content:
+                    public_messages.append(content)
+            elif tool_name == "send_private_message":
+                recipient = args.get("recipient", "")
+                content = args.get("content", "")
+                if recipient and content:
+                    private_messages.append({"recipient": recipient, "content": content})
+            elif tool_name == "submit_guess":
+                code = args.get("code", "")
+                if code:
+                    guess_submitted = code
 
         # ── Update private state ───────────────────────────────────────────
+        # Start from the mutable copy (which may have been updated by tool callbacks)
         updated_state = self._update_private_state(
-            private_state=private_state,
+            private_state=self._current_private_state,
             thought=thought,
             tool_calls_made=tool_calls_made,
         )
@@ -165,28 +196,75 @@ class BaseAgent(ABC):
             guess_submitted=guess_submitted,
         )
 
-    # ── Context building ───────────────────────────────────────────────────
+    def _execute_tool_calls(self, tool_calls: list) -> list[dict[str, Any]]:
+        """Execute a list of tool calls and return results."""
+        results = []
+        for tc in tool_calls:
+            tool_name = tc.get("name", "")
+            tool_args = tc.get("args", {})
+            tool_id = tc.get("id", "")
+            logger.info("[%s] Tool: %s args=%s", self.agent_id.value, tool_name, tool_args)
+            if tool_name not in self._tool_map:
+                result = {"error": f"Tool '{tool_name}' not available"}
+            else:
+                try:
+                    result = self._tool_map[tool_name].invoke(tool_args)
+                except Exception as e:
+                    result = {"error": str(e)}
+                    logger.error("[%s] Tool '%s' error: %s", self.agent_id.value, tool_name, e)
+            results.append({"tool": tool_name, "args": tool_args, "result": result, "id": tool_id})
+        return results
 
-    def _build_context(
-        self,
-        game_state: GlobalGameState,
-        private_state: AgentPrivateState,
-    ) -> str:
-        """
-        Build the context string passed to the LLM as the human message.
-        Includes: turn info, public chat, private inbox, knowledge base.
-        Note: master_key is NEVER included here.
-        """
+    def _build_context(self, game_state: GlobalGameState, private_state: AgentPrivateState) -> str:
+        """Build the context string. Master key is NEVER included."""
         lines: list[str] = []
-
-        lines.append(f"=== GAME STATUS ===")
-        lines.append(f"Turn: {game_state.turn + 1} / {game_state.max_turns}")
+        turns_remaining = game_state.max_turns - game_state.turn
+        lines.append("=== GAME STATUS ===")
+        lines.append(f"Current turn: {game_state.turn + 1} / {game_state.max_turns}")
+        lines.append(f"Turns remaining: {turns_remaining}")
         lines.append(f"You are: {self.agent_id.display_name} {self.agent_id.emoji}")
-        lines.append(f"Guesses remaining: {private_state.guesses_remaining}")
-        lines.append(f"Token budget remaining: {private_state.token_budget - private_state.tokens_used}")
+        lines.append(f"Your guesses remaining: {private_state.guesses_remaining}")
+        if private_state.is_eliminated:
+            lines.append("⚠️ YOU ARE ELIMINATED — you have no guesses left.")
         lines.append("")
 
-        # Public chat (last 10 messages)
+        # Show which agents are eliminated
+        eliminated = [
+            aid.display_name for aid, ps in game_state.agent_states.items()
+            if ps.is_eliminated and aid != self.agent_id
+        ]
+        if eliminated:
+            lines.append(f"ELIMINATED AGENTS (no more turns): {', '.join(eliminated)}")
+            lines.append("")
+
+        # Guess history with per-digit feedback
+        if private_state.guess_history:
+            lines.append("=== YOUR GUESS HISTORY (per-digit feedback) ===")
+            for entry in private_state.guess_history:
+                feedback_str = " ".join(entry.get("feedback", []))
+                lines.append(
+                    f"  Guess '{entry['guess']}': {feedback_str} "
+                    f"({entry['correct_count']}/4 correct)"
+                )
+            lines.append("  → Use ✅ positions to confirm which agents told you the truth!")
+            lines.append("  → Use ❌ positions to identify which agents LIED to you!")
+            lines.append("")
+
+        # Known digits (confirmed correct from guess feedback)
+        if private_state.known_digits:
+            lines.append("=== CONFIRMED CORRECT DIGITS (from guess feedback) ===")
+            for pos, digit in sorted(private_state.known_digits.items()):
+                lines.append(f"  Position {pos} (digit {pos+1}): '{digit}' ✅ CONFIRMED CORRECT")
+            lines.append("")
+
+        # Wrong digits (confirmed wrong from guess feedback)
+        if private_state.wrong_digits:
+            lines.append("=== CONFIRMED WRONG DIGITS (from guess feedback) ===")
+            for pos, digits in sorted(private_state.wrong_digits.items()):
+                lines.append(f"  Position {pos} (digit {pos+1}): NOT {digits} ❌")
+            lines.append("")
+
+        # Public chat (last 10)
         lines.append("=== PUBLIC CHAT (last 10 messages) ===")
         recent_public = game_state.public_chat[-10:]
         if recent_public:
@@ -199,56 +277,28 @@ class BaseAgent(ABC):
         # Private inbox
         inbox = game_state.private_inboxes.get(self.agent_id)
         if inbox and inbox.messages:
-            lines.append("=== YOUR PRIVATE INBOX ===")
-            for msg in inbox.messages[-5:]:  # last 5 DMs
+            lines.append("=== YOUR PRIVATE INBOX (IMPORTANT — READ AND RESPOND) ===")
+            for msg in inbox.messages[-5:]:
                 lines.append(f"  From [{msg.sender}]: {msg.content}")
+            lines.append("  → Respond to these messages using send_private_message!")
             lines.append("")
 
         # Knowledge base
         if private_state.knowledge_base:
-            lines.append("=== YOUR KNOWLEDGE BASE ===")
+            lines.append("=== YOUR KNOWLEDGE BASE (vault clues) ===")
             for clue in private_state.knowledge_base[-10:]:
                 lines.append(f"  - {clue}")
             lines.append("")
 
         # Current suspicion
         if private_state.suspected_key:
-            lines.append(f"=== YOUR CURRENT SUSPICION ===")
+            lines.append("=== YOUR CURRENT BEST GUESS ===")
             lines.append(f"  Suspected key: {private_state.suspected_key}")
-            if private_state.known_digits:
-                known_str = ", ".join(
-                    f"pos {p}={d}" for p, d in sorted(private_state.known_digits.items())
-                )
-                lines.append(f"  Confirmed digits: {known_str}")
             lines.append("")
 
         lines.append("=== YOUR TURN ===")
-        lines.append(
-            "Think carefully, then use your available tools. "
-            "You may use multiple tools in sequence. "
-            "Remember: your goal is to find the 4-digit Master Key before the others."
-        )
-
+        lines.append("Think step by step. Use your tools. GUESS when you have enough information!")
         return "\n".join(lines)
-
-    # ── Tool execution ─────────────────────────────────────────────────────
-
-    def _execute_tool(
-        self,
-        tool_name: str,
-        tool_args: dict,
-        game_state: GlobalGameState,
-        private_state: AgentPrivateState,
-        turn: int,
-    ) -> Any:
-        """Dispatch a tool call to the appropriate service method."""
-        tool_map = {t.name: t for t in self._tools}
-        if tool_name not in tool_map:
-            return f"Error: tool '{tool_name}' not available to {self.agent_id.value}."
-        tool = tool_map[tool_name]
-        return tool.invoke(tool_args)
-
-    # ── Private state update ───────────────────────────────────────────────
 
     def _update_private_state(
         self,
@@ -256,11 +306,8 @@ class BaseAgent(ABC):
         thought: str,
         tool_calls_made: list[dict],
     ) -> AgentPrivateState:
-        """
-        Update the agent's private state after a turn.
-        Appends thought to trace, extracts knowledge from tool results.
-        """
-        updated = private_state.model_copy(deep=True)
+        """Update private state: extract knowledge, parse suspected_key."""
+        updated = private_state  # already a deep copy from run_turn
         updated.turns_played += 1
 
         if thought:
@@ -268,11 +315,38 @@ class BaseAgent(ABC):
 
         # Extract knowledge from vault query results
         for call in tool_calls_made:
-            if call["tool"] == "query_vault" and isinstance(call["result"], list):
-                for fragment in call["result"]:
-                    if isinstance(fragment, dict):
-                        content = fragment.get("content", "")
-                        if content:
-                            updated.add_knowledge(f"[Vault] {content}")
+            if call.get("tool") == "query_vault":
+                result = call.get("result", [])
+                if isinstance(result, list):
+                    for fragment in result:
+                        if isinstance(fragment, dict):
+                            content = fragment.get("content", "")
+                            if content:
+                                updated.add_knowledge(f"[Vault] {content}")
+
+        # Parse suspected_key from thought using regex
+        if thought and not updated.suspected_key:
+            suspected = self._extract_suspected_key(thought)
+            if suspected:
+                updated.suspected_key = suspected
+                logger.info("[%s] Extracted suspected_key: %s", self.agent_id.value, suspected)
 
         return updated
+
+    @staticmethod
+    def _extract_suspected_key(text: str) -> str | None:
+        """Try to extract a 4-digit suspected key from the agent's thought text."""
+        patterns = [
+            r'\b([1-9][1-9][1-9][1-9])\b',
+            r'([1-9])\s([1-9])\s([1-9])\s([1-9])',
+            r'([1-9])-([1-9])-([1-9])-([1-9])',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                groups = match.groups()
+                if len(groups) == 1:
+                    return groups[0]
+                elif len(groups) == 4:
+                    return "".join(groups)
+        return None

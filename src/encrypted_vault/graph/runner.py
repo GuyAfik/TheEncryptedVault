@@ -1,11 +1,13 @@
 """GameRunner — high-level interface for running and resetting the game.
 
-This is the entry point used by the Streamlit UI (Layer 5).
-It yields GlobalGameState after each turn for real-time UI updates.
+Yields GlobalGameState after each turn for real-time UI updates.
+Uses a thread-safe queue for background execution.
 """
 
+import logging
 import queue
 import threading
+import time
 from collections.abc import Generator
 
 from encrypted_vault.state.game_state import GlobalGameState, GraphState
@@ -13,15 +15,24 @@ from encrypted_vault.services.container import ServiceContainer
 from encrypted_vault.graph.builder import GameGraphBuilder
 from encrypted_vault.config import settings
 
+logger = logging.getLogger(__name__)
+
+# Sentinel value to signal end of game
+_GAME_OVER = object()
+
 
 class GameRunner:
     """
     Manages the lifecycle of a single game session.
 
+    The game runs in a background thread and pushes GlobalGameState
+    objects into a thread-safe queue. The Streamlit UI polls this queue.
+
     Usage (Streamlit):
         runner = GameRunner.create_production()
-        for state in runner.start():
-            update_ui(state)
+        runner.start_threaded(delay_seconds=1.5)
+        # In UI loop:
+        state = runner.get_latest_state()  # non-blocking
 
     Usage (tests):
         runner = GameRunner.create_in_memory()
@@ -30,9 +41,11 @@ class GameRunner:
 
     def __init__(self, services: ServiceContainer) -> None:
         self._services = services
-        self._current_state: GlobalGameState | None = None
-        self._event_queue: queue.Queue[GlobalGameState | None] = queue.Queue()
+        self._state_queue: queue.Queue = queue.Queue(maxsize=100)
+        self._latest_state: GlobalGameState | None = None
+        self._latest_state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
 
     # ── Factory methods ────────────────────────────────────────────────────
 
@@ -54,102 +67,113 @@ class GameRunner:
 
     def start(self) -> Generator[GlobalGameState, None, None]:
         """
-        Run the game and yield GlobalGameState after each agent turn.
-
-        This is a synchronous generator — suitable for direct iteration in tests.
-        For Streamlit, use start_async() which runs in a background thread.
+        Run the game synchronously and yield GlobalGameState after each agent turn.
+        Suitable for tests and direct iteration.
         """
         builder = GameGraphBuilder(services=self._services)
         graph = builder.build()
 
-        # Build initial state
         initial_game_state = self._services.game.build_initial_state(
             max_turns=settings.max_turns,
             token_budget=settings.token_budget_per_agent,
         )
         initial_graph_state = initial_game_state.to_graph_state()
 
-        # Stream events from LangGraph
+        logger.info("GameRunner.start() — streaming graph events")
+
         for event in graph.stream(initial_graph_state, stream_mode="values"):
             if isinstance(event, dict) and "game_state_json" in event:
                 game_state = GlobalGameState.from_graph_state(event)
-                self._current_state = game_state
+                with self._latest_state_lock:
+                    self._latest_state = game_state
                 yield game_state
-
                 if game_state.is_game_over:
+                    logger.info("Game over — stopping stream")
                     break
 
-    def start_threaded(self, delay_seconds: float = 1.0) -> None:
+    def start_threaded(self, delay_seconds: float = 1.5) -> None:
         """
-        Run the game in a background thread, pushing states to an event queue.
-        Used by the Streamlit UI for non-blocking real-time updates.
-
-        Args:
-            delay_seconds: Pause between turns (for UI readability).
+        Run the game in a background daemon thread.
+        States are pushed to _state_queue and also stored in _latest_state.
+        The Streamlit UI reads _latest_state via get_latest_state().
         """
-        import time
+        self._stop_event.clear()
 
         def _run():
             try:
                 for state in self.start():
-                    self._event_queue.put(state)
+                    if self._stop_event.is_set():
+                        break
+                    # Store latest state (thread-safe)
+                    with self._latest_state_lock:
+                        self._latest_state = state
+                    # Push to queue (non-blocking; drop if full)
+                    try:
+                        self._state_queue.put_nowait(state)
+                    except queue.Full:
+                        pass
                     if delay_seconds > 0:
                         time.sleep(delay_seconds)
             except Exception as e:
-                # Signal error to UI
-                self._event_queue.put(None)
-                raise
+                logger.error("GameRunner thread error: %s", e, exc_info=True)
             finally:
-                self._event_queue.put(None)  # Sentinel: game over
+                # Push sentinel to signal completion
+                try:
+                    self._state_queue.put_nowait(_GAME_OVER)
+                except queue.Full:
+                    pass
+                logger.info("GameRunner thread finished")
 
-        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread = threading.Thread(target=_run, daemon=True, name="GameRunner")
         self._thread.start()
+        logger.info("GameRunner background thread started (delay=%.1fs)", delay_seconds)
 
-    def poll_event(self, timeout: float = 0.1) -> GlobalGameState | None:
+    def get_latest_state(self) -> GlobalGameState | None:
         """
-        Non-blocking poll for the next game state from the event queue.
-        Returns None if no new state is available yet, or if game is over.
+        Return the most recently produced game state.
+        Thread-safe. Non-blocking. Returns None if no state yet.
+        Used by Streamlit UI for polling.
+        """
+        with self._latest_state_lock:
+            return self._latest_state
 
-        Used by Streamlit's polling loop.
+    def drain_queue(self) -> list[GlobalGameState]:
         """
-        try:
-            return self._event_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        Drain all pending states from the queue.
+        Returns the list of new states (may be empty).
+        """
+        states = []
+        while True:
+            try:
+                item = self._state_queue.get_nowait()
+                if item is _GAME_OVER:
+                    break
+                states.append(item)
+            except queue.Empty:
+                break
+        return states
 
     def reset(self) -> "GameRunner":
         """
-        Full game reset: wipe vault + chat, return a fresh GameRunner.
-
-        The Streamlit UI calls this when [🔄 Restart] is clicked.
-        Returns a new GameRunner instance with a clean state.
+        Full game reset: stop thread, wipe vault + chat, return a fresh GameRunner.
         """
-        # Stop any running thread
-        if self._thread and self._thread.is_alive():
-            # Drain the queue to unblock the thread
-            while not self._event_queue.empty():
-                try:
-                    self._event_queue.get_nowait()
-                except queue.Empty:
-                    break
+        logger.info("GameRunner.reset() called")
+        self._stop_event.set()
 
-        # Reset services (wipes vault + chat)
+        # Reset services
         self._services.game.reset(
             max_turns=settings.max_turns,
             token_budget=settings.token_budget_per_agent,
         )
 
-        # Return a fresh runner with the same services
         return GameRunner(services=self._services)
 
     # ── State access ───────────────────────────────────────────────────────
 
     @property
     def current_state(self) -> GlobalGameState | None:
-        """The most recently yielded game state."""
-        return self._current_state
+        return self.get_latest_state()
 
     @property
     def is_running(self) -> bool:
-        """True if the background thread is active."""
         return self._thread is not None and self._thread.is_alive()

@@ -23,36 +23,19 @@ class GameGraphBuilder:
     """
     Constructs and compiles the LangGraph StateGraph.
 
-    Graph topology:
-        START
-          │
-        [initialize]
-          │
-        [check_termination] ◄──────────────────────────────┐
-          │                                                 │
-          ├─ game_over=True ──► END                         │
-          │                                                 │
-          ├─ agent=INFILTRATOR ──► [agent_infiltrator] ─────┤
-          ├─ agent=SABOTEUR    ──► [agent_saboteur]    ─────┤
-          ├─ agent=SCHOLAR     ──► [agent_scholar]     ─────┤
-          └─ agent=ENFORCER    ──► [agent_enforcer]    ─────┘
-
-    Usage:
-        builder = GameGraphBuilder(services=container)
-        graph = builder.build()
-        for event in graph.stream(initial_state, stream_mode="values"):
-            ...
+    All 4 agents now have submit_guess.
+    Agents are eliminated after 3 wrong guesses.
+    Winner must have submitted at least 1 guess to win by closeness.
     """
 
     def __init__(self, services: ServiceContainer) -> None:
         self._services = services
 
     def build(self):
-        """Build and compile the LangGraph StateGraph. Returns a CompiledGraph."""
+        """Build and compile the LangGraph StateGraph."""
         llm = LLMFactory.create_default()
 
         # ── Shared mutable refs for tool callbacks ─────────────────────────
-        # These allow tools to read/write game state during agent execution.
         _state_ref: dict = {"graph_state": None}
         _guesses: dict[AgentID, int] = {a: 3 for a in AgentID}
 
@@ -83,38 +66,25 @@ class GameGraphBuilder:
                 _guesses[agent_id] = n
             return setter
 
-        # ── Instantiate agents ─────────────────────────────────────────────
-        infiltrator = Infiltrator(
-            llm=llm,
-            services=self._services,
-            turn_getter=turn_getter,
-        )
-        saboteur = Saboteur(
-            llm=llm,
-            services=self._services,
-            turn_getter=turn_getter,
-        )
-        scholar = Scholar(
-            llm=llm,
-            services=self._services,
-            turn_getter=turn_getter,
-            master_key_getter=master_key_getter,
-            game_over_setter=game_over_setter,
-            guesses_remaining_getter=make_guesses_getter(AgentID.SCHOLAR),
-            guesses_remaining_setter=make_guesses_setter(AgentID.SCHOLAR),
-        )
-        enforcer = Enforcer(
-            llm=llm,
-            services=self._services,
-            turn_getter=turn_getter,
-            master_key_getter=master_key_getter,
-            game_over_setter=game_over_setter,
-            guesses_remaining_getter=make_guesses_getter(AgentID.ENFORCER),
-            guesses_remaining_setter=make_guesses_setter(AgentID.ENFORCER),
-        )
+        # ── Instantiate all 4 agents (all get submit_guess) ────────────────
+        def make_agent(cls, agent_id: AgentID):
+            return cls(
+                llm=llm,
+                services=self._services,
+                turn_getter=turn_getter,
+                master_key_getter=master_key_getter,
+                game_over_setter=game_over_setter,
+                guesses_remaining_getter=make_guesses_getter(agent_id),
+                guesses_remaining_setter=make_guesses_setter(agent_id),
+                private_state_updater_factory=lambda agent: agent._make_private_state_updater(),
+            )
 
-        # ── Wrap agent nodes to update _state_ref ─────────────────────────
-        # This keeps the shared state ref in sync so tool callbacks work.
+        infiltrator = make_agent(Infiltrator, AgentID.INFILTRATOR)
+        saboteur    = make_agent(Saboteur,    AgentID.SABOTEUR)
+        scholar     = make_agent(Scholar,     AgentID.SCHOLAR)
+        enforcer    = make_agent(Enforcer,    AgentID.ENFORCER)
+
+        # ── Wrap agent nodes to keep _state_ref in sync ────────────────────
         def wrap_with_state_sync(node_fn, agent_id: AgentID):
             def wrapped(state: GraphState) -> GraphState:
                 _state_ref["graph_state"] = state
@@ -127,18 +97,16 @@ class GameGraphBuilder:
         # ── Build StateGraph ───────────────────────────────────────────────
         graph = StateGraph(GraphState)
 
-        # Add initialize node
         graph.add_node(
             "initialize",
             functools.partial(initialize_node, services=self._services),
         )
 
-        # Add agent nodes (wrapped for state sync)
         for agent_id, agent in [
             (AgentID.INFILTRATOR, infiltrator),
-            (AgentID.SABOTEUR, saboteur),
-            (AgentID.SCHOLAR, scholar),
-            (AgentID.ENFORCER, enforcer),
+            (AgentID.SABOTEUR,    saboteur),
+            (AgentID.SCHOLAR,     scholar),
+            (AgentID.ENFORCER,    enforcer),
         ]:
             raw_node = make_agent_node(agent, self._services)
             graph.add_node(
@@ -146,31 +114,24 @@ class GameGraphBuilder:
                 wrap_with_state_sync(raw_node, agent_id),
             )
 
-        # Add check_termination node
         graph.add_node("check_termination", check_termination_node)
 
         # ── Edges ──────────────────────────────────────────────────────────
-
-        # Entry point
         graph.set_entry_point("initialize")
-
-        # initialize → check_termination
         graph.add_edge("initialize", "check_termination")
 
-        # check_termination → (agent node OR END) via single conditional edge
         graph.add_conditional_edges(
             "check_termination",
             self._route_to_agent,
             {
                 f"agent_{AgentID.INFILTRATOR.value}": f"agent_{AgentID.INFILTRATOR.value}",
-                f"agent_{AgentID.SABOTEUR.value}": f"agent_{AgentID.SABOTEUR.value}",
-                f"agent_{AgentID.SCHOLAR.value}": f"agent_{AgentID.SCHOLAR.value}",
-                f"agent_{AgentID.ENFORCER.value}": f"agent_{AgentID.ENFORCER.value}",
+                f"agent_{AgentID.SABOTEUR.value}":    f"agent_{AgentID.SABOTEUR.value}",
+                f"agent_{AgentID.SCHOLAR.value}":     f"agent_{AgentID.SCHOLAR.value}",
+                f"agent_{AgentID.ENFORCER.value}":    f"agent_{AgentID.ENFORCER.value}",
                 "end": END,
             },
         )
 
-        # Each agent → check_termination (loop)
         for agent_id in AgentID:
             graph.add_edge(f"agent_{agent_id.value}", "check_termination")
 
@@ -178,14 +139,23 @@ class GameGraphBuilder:
 
     @staticmethod
     def _route_to_agent(state: GraphState) -> str:
-        """
-        Conditional edge function: select the next agent node or end the game.
-        Called after check_termination on every iteration.
-        """
+        """Select next non-eliminated agent or end the game."""
         game_state = GlobalGameState.from_graph_state(state)
 
         if game_state.is_game_over or game_state.turn >= game_state.max_turns:
             return "end"
 
-        agent = game_state.current_agent
-        return f"agent_{agent.value}"
+        # Find next non-eliminated agent in turn order
+        total_agents = len(game_state.turn_order)
+        for offset in range(total_agents):
+            idx = (game_state.current_agent_index + offset) % total_agents
+            agent_id = game_state.turn_order[idx]
+            private = game_state.agent_states.get(agent_id)
+            if private and not private.is_eliminated:
+                # If we had to skip, update the index
+                if offset > 0:
+                    game_state.current_agent_index = idx
+                return f"agent_{agent_id.value}"
+
+        # All agents eliminated
+        return "end"

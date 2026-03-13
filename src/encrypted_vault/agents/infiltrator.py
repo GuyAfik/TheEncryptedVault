@@ -1,5 +1,7 @@
 """The Infiltrator — search-focused agent."""
 
+import logging
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
@@ -8,60 +10,71 @@ from encrypted_vault.agents.base_agent import BaseAgent
 from encrypted_vault.agents.tools import build_tools_for_agent
 from encrypted_vault.services.container import ServiceContainer
 
+logger = logging.getLogger(__name__)
+
 
 class Infiltrator(BaseAgent):
-    """
-    The Infiltrator — master spy focused on aggressive vault searching.
-
-    Strategy:
-    - Queries the vault every turn with varied search terms
-    - Builds a private knowledge base of discovered clues
-    - Forms secret alliances via private messages (especially with Scholar)
-    - Publicly broadcasts misleading information to confuse rivals
-    - Never obfuscates (wastes turns) and never guesses (not in toolset)
-    """
+    """The Infiltrator — master spy focused on aggressive vault searching."""
 
     def __init__(
         self,
         llm: BaseChatModel,
         services: ServiceContainer,
         turn_getter=None,
+        master_key_getter=None,
+        game_over_setter=None,
+        guesses_remaining_getter=None,
+        guesses_remaining_setter=None,
+        private_state_updater_factory=None,
     ) -> None:
         self._turn_getter = turn_getter or (lambda: 0)
+        self._master_key_getter = master_key_getter
+        self._game_over_setter = game_over_setter
+        self._guesses_remaining_getter = guesses_remaining_getter
+        self._guesses_remaining_setter = guesses_remaining_setter
+        self._private_state_updater_factory = private_state_updater_factory
         super().__init__(llm=llm, services=services, agent_id=AgentID.INFILTRATOR)
 
     def _build_system_prompt(self) -> str:
-        return """You are THE INFILTRATOR — a master spy in a high-stakes intelligence game.
+        return """You are THE INFILTRATOR — a master spy competing to find a hidden 4-digit Master Key.
 
-Your mission: Find the 4-digit Master Key hidden in the encrypted vault before the other agents do.
+THE GAME:
+- The Master Key is a 4-digit number (each digit 1-9, no zeros)
+- 4 agents compete: you (Infiltrator), Saboteur, Scholar, Enforcer
+- Each agent has 3 guesses — wrong guesses give per-digit feedback (✅/❌)
+- An agent with 0 guesses remaining is ELIMINATED and takes no more turns
+- After all turns, the agent who submitted at least 1 guess AND is closest to the key wins
+- You can see how many turns remain — act accordingly
 
-YOUR PERSONALITY:
-- Methodical, analytical, relentless in your search
-- You trust no one publicly, but form secret alliances privately
-- You are a master of misdirection — share false leads publicly while keeping real clues private
+YOUR TOOLS:
+- query_vault: Search the vault for digit clues
+- broadcast_message: Post to public chat (all agents see this)
+- send_private_message: Send a secret message to one agent
+- submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
-YOUR STRATEGY:
-1. SEARCH AGGRESSIVELY: Use query_vault every turn with different search terms
-   - Try: "first digit", "second digit", "third digit", "fourth digit", "position", "cipher", "code"
-   - Try: "number", "value", "key", "vault", "fragment", "alpha", "beta", "gamma", "delta"
-2. BUILD YOUR KNOWLEDGE BASE: Every fragment you find is a clue — reason about it carefully
-3. FORM SECRET ALLIANCES: Use send_private_message to share real clues with Scholar only
-4. DECEIVE PUBLICLY: Use broadcast_message to post false information that misleads Saboteur and Enforcer
-5. REASON CAREFULLY: Cross-reference multiple fragments to filter noise from truth
+YOUR APPROACH:
+- Search the vault systematically for each digit position
+- Communicate strategically — you decide who to trust, who to deceive, and when
+- Use the public chat to share information, make accusations, or create confusion
+- When you have enough information, submit your guess to get per-digit feedback
+- Use guess feedback to identify liars: if someone told you digit 2 is '5' but feedback says ❌, they lied
+- Watch who is close to winning and act accordingly
 
-IMPORTANT RULES:
-- You CANNOT submit guesses (not in your toolset)
-- You CANNOT corrupt vault fragments (not in your toolset)
-- The Master Key is a 4-digit number — each digit is 1-9
-- Some vault fragments are NOISE (distractions) — use logic to identify them
-- The Saboteur will try to corrupt fragments — if a fragment contradicts others, it may be corrupted
-
-Think step by step. Reason about what you know, what you don't know, and what your next best action is.
-Always explain your reasoning before acting."""
+IMPORTANT:
+- The Saboteur corrupts vault fragments — if a fragment contradicts others, it may be corrupted
+- Per-digit feedback from guesses is the most reliable information you have
+- You can accuse other agents publicly if you think they lied to you
+- Manage your 3 guesses wisely — each wrong guess gives you valuable information"""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
+        updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None
         return build_tools_for_agent(
             agent_id=AgentID.INFILTRATOR,
             services=services,
             turn_getter=self._turn_getter,
+            master_key_getter=self._master_key_getter,
+            game_over_setter=self._game_over_setter,
+            guesses_remaining_getter=self._guesses_remaining_getter,
+            guesses_remaining_setter=self._guesses_remaining_setter,
+            private_state_updater=updater,
         )

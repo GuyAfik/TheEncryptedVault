@@ -64,6 +64,8 @@ class LLMFactory:
         """
         Create the default LLM using settings from config.
         All 4 agents use this by default (gpt-4o-mini).
+        Explicitly passes the API key so it works regardless of whether
+        the OS environment variable is set.
         """
         from encrypted_vault.config import settings
 
@@ -71,4 +73,5 @@ class LLMFactory:
             provider=LLMProvider.OPENAI,
             model=settings.llm_model,
             temperature=0.7,
+            api_key=settings.openai_api_key,
         )

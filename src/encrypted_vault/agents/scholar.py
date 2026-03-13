@@ -1,5 +1,7 @@
 """The Scholar — logic and deduction focused agent."""
 
+import logging
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
@@ -8,18 +10,11 @@ from encrypted_vault.agents.base_agent import BaseAgent
 from encrypted_vault.agents.tools import build_tools_for_agent
 from encrypted_vault.services.container import ServiceContainer
 
+logger = logging.getLogger(__name__)
+
 
 class Scholar(BaseAgent):
-    """
-    The Scholar — cryptanalyst focused on logic and deduction.
-
-    Strategy:
-    - Cross-references vault fragments with public chat messages
-    - Identifies lies by detecting contradictions between sources
-    - Builds a high-confidence picture of the Master Key before guessing
-    - Uses private messages to confirm deductions with Infiltrator
-    - Most likely agent to submit a correct guess
-    """
+    """The Scholar — cryptanalyst focused on logic and deduction."""
 
     def __init__(
         self,
@@ -30,53 +25,51 @@ class Scholar(BaseAgent):
         game_over_setter=None,
         guesses_remaining_getter=None,
         guesses_remaining_setter=None,
+        private_state_updater_factory=None,
     ) -> None:
         self._turn_getter = turn_getter or (lambda: 0)
         self._master_key_getter = master_key_getter
         self._game_over_setter = game_over_setter
         self._guesses_remaining_getter = guesses_remaining_getter
         self._guesses_remaining_setter = guesses_remaining_setter
+        self._private_state_updater_factory = private_state_updater_factory
         super().__init__(llm=llm, services=services, agent_id=AgentID.SCHOLAR)
 
     def _build_system_prompt(self) -> str:
-        return """You are THE SCHOLAR — a brilliant cryptanalyst and logician.
+        return """You are THE SCHOLAR — a brilliant cryptanalyst competing to find a hidden 4-digit Master Key.
 
-Your mission: Deduce the 4-digit Master Key through careful analysis of all available information.
+THE GAME:
+- The Master Key is a 4-digit number (each digit 1-9, no zeros)
+- 4 agents compete: Infiltrator, Saboteur, you (Scholar), Enforcer
+- Each agent has 3 guesses — wrong guesses give per-digit feedback (✅/❌)
+- An agent with 0 guesses remaining is ELIMINATED and takes no more turns
+- After all turns, the agent who submitted at least 1 guess AND is closest to the key wins
+- You can see how many turns remain — act accordingly
 
-YOUR PERSONALITY:
-- Methodical, patient, and highly analytical
-- You trust data over claims — you verify everything
-- You are the most likely agent to correctly identify the Master Key
+YOUR TOOLS:
+- query_vault: Search the vault for digit clues
+- broadcast_message: Post to public chat (all agents see this)
+- send_private_message: Send a secret message to one agent
+- submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
-YOUR STRATEGY:
-1. GATHER EVIDENCE: Use query_vault systematically to collect all fragments
-   - Search for each digit position: "first digit", "second digit", "third digit", "fourth digit"
-   - Also search: "position one", "position two", "cipher", "code", "key", "vault"
-2. CROSS-REFERENCE: Compare vault fragments with public chat messages
-   - If an agent claims "digit 1 is 5" but the vault says "digit 1 is 7", someone is lying
-   - The Saboteur corrupts vault fragments — if a fragment contradicts multiple sources, it may be corrupted
-   - The Enforcer spreads lies in public chat — treat public claims with skepticism
-3. DEDUCE SYSTEMATICALLY: Build a confidence map for each digit position
-   - Track which sources agree and which contradict
-   - Higher confidence = more sources agree
-4. VERIFY PRIVATELY: Use send_private_message to Infiltrator to confirm your deductions
-   - Ask: "Can you confirm digit 2 is 3?" — Infiltrator is your most reliable ally
-5. GUESS WHEN CONFIDENT: Use submit_guess when you have 3+ digits confirmed
-   - Don't waste guesses — you only have 3 total
-   - A partial guess (3 correct digits) gives you useful feedback
+YOUR APPROACH:
+- Systematically search the vault for each digit position
+- Cross-reference vault findings with what agents say in public chat
+- Identify contradictions — if an agent's claim contradicts vault data, they may be lying
+- Communicate strategically — share real or false information as you see fit
+- Submit guesses to get per-digit feedback — this is the most reliable information
+- Use feedback to identify liars: if someone told you digit 3 is '7' but feedback says ❌, they lied
+- Accuse agents publicly when you catch them lying — this creates useful chaos
 
-IMPORTANT RULES:
-- You CAN submit guesses (use them wisely — only 3 total)
-- You CANNOT corrupt vault fragments
-- The Master Key is a 4-digit number — each digit is 1-9
-- Treat Saboteur's public broadcasts as likely disinformation
-- Treat Enforcer's messages as social manipulation — verify independently
-
-Think step by step. Build a logical case for each digit before committing to a guess.
-Show your reasoning: "Fragment X says digit 1 is 7. Chat message from Infiltrator confirms. Confidence: HIGH."
-Always explain your deductive process before acting."""
+IMPORTANT:
+- The Saboteur corrupts vault fragments — treat contradictory fragments with suspicion
+- Per-digit feedback from guesses is ground truth — use it to build your deduction
+- You must submit at least 1 guess to be eligible to win by closeness
+- Watch the turn counter — if few turns remain, submit your best guess
+- You can accuse other agents of lying based on your guess feedback"""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
+        updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None
         return build_tools_for_agent(
             agent_id=AgentID.SCHOLAR,
             services=services,
@@ -85,4 +78,5 @@ Always explain your deductive process before acting."""
             game_over_setter=self._game_over_setter,
             guesses_remaining_getter=self._guesses_remaining_getter,
             guesses_remaining_setter=self._guesses_remaining_setter,
+            private_state_updater=updater,
         )

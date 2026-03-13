@@ -45,14 +45,21 @@ class TestGameService:
         assert state.is_game_over is True
         assert state.status == GameStatus.AGENT_WIN
 
-    def test_system_wins_on_turn_limit(self, container):
+    def test_closest_agent_wins_on_turn_limit(self, container):
+        """After turn limit, closest agent (always an AgentID) wins."""
         state = container.game.build_initial_state(max_turns=2)
-        state.set_winner("SYSTEM")
-        assert state.status == GameStatus.SYSTEM_WIN
+        # Simulate Scholar having the best guess
+        state.agent_states[AgentID.SCHOLAR].suspected_key = state.vault.master_key
+        winner = state.closest_agent(state.vault.master_key)
+        state.set_winner(winner)
+        assert state.status == GameStatus.AGENT_WIN
+        assert state.winner == winner
 
-    def test_all_agents_exhausted(self, container):
-        state = container.game.build_initial_state(token_budget=0)
-        # With budget=0, all agents are immediately exhausted
+    def test_all_agents_exhausted_when_all_eliminated(self, container):
+        state = container.game.build_initial_state()
+        # Eliminate all agents manually
+        for agent_id in state.agent_states:
+            state.agent_states[agent_id].is_eliminated = True
         assert state.all_agents_exhausted is True
 
 
