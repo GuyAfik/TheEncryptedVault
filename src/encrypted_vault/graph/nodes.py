@@ -109,8 +109,6 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer, reset_turn_cou
         # ── 2. Sync guesses_remaining from the shared _guesses dict ───────
         # The submit_guess tool decrements the _guesses dict via the setter callback.
         # We must read it back and write it into the Pydantic state so the UI sees it.
-        # The guesses_remaining_getter is stored on the agent via closure — we access
-        # it through the tool's closure by checking the tool_calls_made results.
         for call in result.tool_calls_made:
             if call.get("tool") == "submit_guess":
                 result_data = call.get("result", {})
@@ -123,6 +121,67 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer, reset_turn_cou
                     else:
                         # Decrement by 1 if not already tracked
                         updated_private.guesses_remaining = max(0, updated_private.guesses_remaining - 1)
+
+        # ── 2b. Fallback: force a guess if agent skipped guessing ──────────
+        # If the agent had guesses remaining but didn't submit one, auto-submit
+        # their best known guess so no turn is wasted.
+        if result.guess_submitted is None and updated_private.guesses_remaining > 0 and not game_state.is_game_over:
+            # Build best guess from known_digits + suspected_key
+            template = list(updated_private.suspected_key or "1111")
+            if len(template) != 4:
+                template = ["1", "1", "1", "1"]
+            for pos, digit in updated_private.known_digits.items():
+                if 0 <= pos <= 3:
+                    template[pos] = digit
+            # Avoid repeating a previous guess
+            candidate = "".join(template)
+            prev_guesses = [e["guess"] for e in updated_private.guess_history if not e.get("rejected")]
+            if candidate in prev_guesses:
+                # Mutate one unknown position
+                for i in range(4):
+                    if i not in updated_private.known_digits:
+                        for d in "123456789":
+                            alt = template[:]
+                            alt[i] = d
+                            alt_code = "".join(alt)
+                            if alt_code not in prev_guesses:
+                                candidate = alt_code
+                                template = alt
+                                break
+                        break
+
+            # Only auto-guess if candidate is valid (4 digits, not already guessed)
+            if len(candidate) == 4 and candidate.isdigit() and candidate not in prev_guesses:
+                logger.warning("[%s] AUTO-GUESS fallback: agent skipped guessing, forcing '%s'",
+                               agent_name, candidate)
+                # Call submit_guess tool directly via agent's tool map
+                submit_tool = agent._tool_map.get("submit_guess")
+                if submit_tool is not None:
+                    try:
+                        auto_result = submit_tool.invoke({"code": candidate})
+                        auto_result_dict = auto_result if isinstance(auto_result, dict) else {"message": str(auto_result)}
+                        result.tool_calls_made.append({
+                            "tool": "submit_guess",
+                            "args": {"code": candidate},
+                            "result": auto_result_dict,
+                        })
+                        result.guess_submitted = candidate
+                        # Sync guesses_remaining from auto-guess result
+                        new_remaining = auto_result_dict.get("guesses_remaining")
+                        if new_remaining is not None:
+                            updated_private.guesses_remaining = new_remaining
+                        else:
+                            updated_private.guesses_remaining = max(0, updated_private.guesses_remaining - 1)
+                        # Announce in public chat
+                        auto_msg = ChatMessage(
+                            turn=turn,
+                            sender="SYSTEM",
+                            content=f"⚡ {agent.agent_id.display_name} auto-submitted guess '{candidate}' (skipped guessing this turn).",
+                        )
+                        game_state.add_public_message(auto_msg)
+                        services.chat.broadcast(turn=turn, sender="SYSTEM", content=auto_msg.content)
+                    except Exception as e:
+                        logger.warning("[%s] Auto-guess failed: %s", agent_name, e)
 
         # ── 3. Track has_guessed and elimination ───────────────────────────
         if result.guess_submitted is not None:

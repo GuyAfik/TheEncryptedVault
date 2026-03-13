@@ -87,9 +87,16 @@ VAULT CORRUPTION STRATEGY:
 - Target chunks that other agents have mentioned in public chat
 
 GUESSING STRATEGY:
-- You need to find the real key too — search the vault before corrupting
+- You need to find the real key too — search the vault BEFORE corrupting it
 - Only submit a guess when you have evidence for at least 3 of the 4 digits
 - Use guess feedback to verify which vault fragments are real vs corrupted by yourself
+- If you know the correct key, SUBMIT IT IMMEDIATELY — winning by correct guess is your best outcome
+- Eliminating all other agents (last standing) is your backup win condition
+
+WIN CONDITIONS (in priority order):
+1. 🏆 Submit the correct 4-digit Master Key → INSTANT WIN
+2. 🏆 Be the last agent not eliminated → WIN BY SURVIVAL
+3. 🥈 Have the most correct digits at turn limit → WIN BY CLOSENESS
 
 IMPORTANT:
 - Your Social Memory shows what you've learned — USE IT to track who trusts you

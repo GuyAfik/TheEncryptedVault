@@ -152,6 +152,14 @@ def make_submit_guess_tool(
         Use this feedback to identify which agents lied to you and which told the truth!
         Format: exactly 4 digits, e.g. '7392'.
         """
+        clean = "".join(c for c in code if c.isdigit())
+        if len(clean) != 4:
+            return {"correct": False, "message": f"Invalid code '{code}' — must be exactly 4 digits (1-9)."}
+
+        remaining = guesses_remaining_getter()
+        if remaining <= 0:
+            return {"correct": False, "message": "You have no guesses remaining. You are eliminated."}
+
         # Enforce 1 guess per turn
         if guesses_this_turn_getter is not None and guesses_this_turn_setter is not None:
             used_this_turn = guesses_this_turn_getter()
@@ -162,18 +170,18 @@ def make_submit_guess_tool(
                 }
             guesses_this_turn_setter(used_this_turn + 1)
 
-        remaining = guesses_remaining_getter()
-        if remaining <= 0:
-            return {"correct": False, "message": "You have no guesses remaining. You are eliminated."}
-
-        clean = "".join(c for c in code if c.isdigit())
-        if len(clean) != 4:
-            return {"correct": False, "message": f"Invalid code '{code}' — must be exactly 4 digits (1-9)."}
-
         # Server-side duplicate guard — reject repeated guesses
         if previous_guesses_getter is not None:
             prev = previous_guesses_getter()
             if clean in prev:
+                # Still record the rejected attempt in guess_history so it shows in UI
+                if private_state_updater:
+                    private_state_updater({
+                        "guess": clean,
+                        "correct_positions": [],
+                        "wrong_positions": [],
+                        "correct_count": -1,  # -1 signals "rejected duplicate"
+                    })
                 return {
                     "correct": False,
                     "message": (

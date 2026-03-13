@@ -91,6 +91,17 @@ class BaseAgent(ABC):
             # Record guess history
             guess = feedback.get("guess", "")
             correct_count = feedback.get("correct_count", 0)
+
+            if correct_count == -1:
+                # Rejected duplicate — record with a special marker, no digit updates
+                state.guess_history.append({
+                    "guess": guess,
+                    "feedback": ["🚫", "🚫", "🚫", "🚫"],
+                    "correct_count": 0,
+                    "rejected": True,
+                })
+                return  # Don't update known/wrong digits for rejected guesses
+
             correct_pos_list = [p for p, _ in feedback.get("correct_positions", [])]
             per_digit_icons = ["✅" if i in correct_pos_list else "❌" for i in range(4)]
 
@@ -295,6 +306,19 @@ class BaseAgent(ABC):
         """Build the context string. Master key is NEVER included."""
         lines: list[str] = []
         turns_remaining = game_state.max_turns - game_state.turn
+
+        # ── ABSOLUTE CONSTRAINTS — shown FIRST so the LLM cannot miss them ──
+        if private_state.known_digits or private_state.wrong_digits:
+            lines.append("🚨🚨🚨 ABSOLUTE CONSTRAINTS — VIOLATING THESE MEANS AN INVALID GUESS 🚨🚨🚨")
+            if private_state.known_digits:
+                for pos, digit in sorted(private_state.known_digits.items()):
+                    lines.append(f"  ✅ Position {pos+1} IS '{digit}' — LOCK THIS IN. NEVER change it.")
+            if private_state.wrong_digits:
+                for pos, digits in sorted(private_state.wrong_digits.items()):
+                    lines.append(f"  ❌ Position {pos+1} CANNOT be {digits} — NEVER use these here.")
+            lines.append("🚨🚨🚨 END ABSOLUTE CONSTRAINTS 🚨🚨🚨")
+            lines.append("")
+
         lines.append("=== GAME STATUS ===")
         lines.append(f"Current turn: {game_state.turn + 1} / {game_state.max_turns}")
         lines.append(f"Turns remaining: {turns_remaining}")
@@ -412,7 +436,24 @@ class BaseAgent(ABC):
             lines.append("")
 
         lines.append("=== YOUR TURN ===")
-        lines.append("Think step by step. Use your tools. GUESS when you have enough information!")
+        guesses_left = private_state.guesses_remaining
+        if guesses_left > 0:
+            lines.append(f"⚠️  You have {guesses_left} guess(es) remaining.")
+            if private_state.suspected_key and "?" not in private_state.suspected_key:
+                lines.append(f"⚠️  You MUST call submit_guess('{private_state.suspected_key}') THIS TURN.")
+                lines.append("    Do NOT skip guessing. Every turn without a guess is a wasted opportunity.")
+            elif private_state.known_digits:
+                template = ["1", "1", "1", "1"]  # safe default digits
+                for pos, digit in private_state.known_digits.items():
+                    template[pos] = digit
+                best = "".join(template)
+                lines.append(f"⚠️  You MUST call submit_guess THIS TURN. Your best template: {best}")
+                lines.append("    Fill unknown positions with your best guess — do NOT skip guessing.")
+            else:
+                lines.append("⚠️  You MUST call submit_guess THIS TURN with your best 4-digit guess.")
+                lines.append("    Even without confirmed digits, guessing gives you per-digit feedback!")
+        else:
+            lines.append("You are ELIMINATED — no more guesses. You may still broadcast or send messages.")
         return "\n".join(lines)
 
     def _update_private_state(

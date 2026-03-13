@@ -261,10 +261,16 @@ def render_agent_progress(gs: GlobalGameState | None):
                     for i, entry in enumerate(private.guess_history, 1):
                         fb = " ".join(entry.get("feedback", []))
                         correct = entry.get("correct_count", 0)
-                        st.markdown(
-                            f'<div class="guess-feedback">Guess #{i}: <strong>{entry["guess"]}</strong> → {fb} ({correct}/4 correct)</div>',
-                            unsafe_allow_html=True,
-                        )
+                        if entry.get("rejected"):
+                            st.markdown(
+                                f'<div class="guess-feedback">Guess #{i}: <strong>{entry["guess"]}</strong> → 🚫 REJECTED (duplicate)</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f'<div class="guess-feedback">Guess #{i}: <strong>{entry["guess"]}</strong> → {fb} ({correct}/4 correct)</div>',
+                                unsafe_allow_html=True,
+                            )
 
             with col_stats:
                 st.metric("Closeness", f"{closeness}/4")
@@ -302,10 +308,10 @@ def render_thought_traces(gs: GlobalGameState | None):
                 last_3 = private.thought_trace[-3:]
                 for i, thought in enumerate(reversed(last_3)):
                     label = "Most recent" if i == 0 else f"{i + 1} turns ago"
-                    # Strip "Tools used:" section and trim to 200 chars
+                    # Strip "Tools used:" section and trim to 600 chars
                     summary = thought.split("Tools used:")[0].strip()
-                    if len(summary) > 200:
-                        summary = summary[:197] + "…"
+                    if len(summary) > 600:
+                        summary = summary[:597] + "…"
                     st.markdown(
                         f'<div class="thought-box">'
                         f'<span style="color:{color};font-size:0.75rem;font-weight:bold;">[{label}]</span><br/>'
@@ -408,11 +414,17 @@ def render_game_over(gs: GlobalGameState):
         # Show their guess history
         if private and private.guess_history:
             for j, entry in enumerate(private.guess_history, 1):
-                fb = " ".join(entry.get("feedback", []))
-                st.markdown(
-                    f'&nbsp;&nbsp;&nbsp;&nbsp;Guess #{j}: `{entry["guess"]}` → {fb} ({entry["correct_count"]}/4)',
-                    unsafe_allow_html=True,
-                )
+                if entry.get("rejected"):
+                    st.markdown(
+                        f'&nbsp;&nbsp;&nbsp;&nbsp;Guess #{j}: `{entry["guess"]}` → 🚫 REJECTED (duplicate)',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    fb = " ".join(entry.get("feedback", []))
+                    st.markdown(
+                        f'&nbsp;&nbsp;&nbsp;&nbsp;Guess #{j}: `{entry["guess"]}` → {fb} ({entry["correct_count"]}/4)',
+                        unsafe_allow_html=True,
+                    )
 
     st.markdown("---")
     if st.button("🔄 Play Again", type="primary", use_container_width=True):
