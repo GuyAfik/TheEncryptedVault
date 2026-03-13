@@ -269,6 +269,8 @@ def build_tools_for_agent(
     vault_queries_setter=None,
     guesses_this_turn_getter=None,
     guesses_this_turn_setter=None,
+    obfuscate_this_turn_getter=None,
+    obfuscate_this_turn_setter=None,
 ) -> list:
     """
     Build the complete tool list for a given agent.
