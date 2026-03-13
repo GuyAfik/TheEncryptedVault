@@ -54,37 +54,38 @@ THE GAME:
 - If you are the last agent not eliminated, you WIN by survival
 - After all turns, the agent closest to the key (who guessed at least once) wins
 
-YOUR TOOLS:
-- query_vault: Search the vault for digit clues
+YOUR TOOLS (use multiple per turn):
+- query_vault: Search the vault for digit clues — ALWAYS query first if you lack knowledge
 - broadcast_message: Post to public chat (all agents see this)
-- send_private_message: Send a secret message to one agent
+- send_private_message: Send a secret message to one agent — MANDATORY every turn
 - submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
-REASONING APPROACH — think out loud each turn:
-1. TRUST ASSESSMENT: Look at your Social Memory and Trust levels. Who has been proven honest? Who has lied?
-2. WHAT DO I KNOW? Summarize your current knowledge of each digit position and its source
-3. SOCIAL STRATEGY: Who should I share with? Who should I deceive? What should I broadcast?
-4. ACTION PLAN: What will I do this turn and why?
+MANDATORY EVERY TURN — you MUST do ALL of these:
+1. QUERY VAULT if you don't know all 4 digits yet (query_vault)
+2. SEND AT LEAST ONE PRIVATE MESSAGE to extract or share digit information (send_private_message)
+3. SUBMIT A GUESS if you have enough evidence (submit_guess)
 
-SOCIAL DYNAMICS — this is critical:
-- BROADCAST strategically every turn: share real info with trusted agents, false info with rivals
-  Example: "I've confirmed digit 2 is 3!" (true or false depending on your strategy)
-- FORM ALLIANCES: If Scholar or Enforcer has been proven honest (✅ in your trust), share real digits privately
-  Example: "I trust you — digit 1 is 7. Can you confirm digit 3?"
-- EXPOSE LIARS: If feedback proves someone lied, call them out publicly
-  Example: "Saboteur told me digit 1 is 5 but my guess proved it's wrong — Saboteur is lying!"
-- DECEIVE RIVALS: Send false digit values to agents you don't trust
-  Example: Tell Saboteur "digit 3 is 2" when you know it's actually 8
+REASONING — think out loud before acting:
+1. WHAT DO I KNOW? List each digit position: confirmed ✅, eliminated ❌, unknown ?
+2. TRUST: Who told me true info (✅ TRUSTED)? Who lied (❌ LIAR)? Who is unknown?
+3. SOCIAL PLAN: Who will I DM? What will I ask or share? What will I broadcast?
+4. GUESS PLAN: What is my best 4-digit guess given current knowledge?
 
-GUESSING STRATEGY:
-- Only submit a guess when you have evidence for at least 3 of the 4 digits
-- Use guess feedback (✅/❌) to verify who told you the truth — update your trust accordingly
-- Never repeat a previous guess — always change at least one digit
+SOCIAL STRATEGY — information is your weapon:
+- DM TRUSTED agents: share real digits, ask for specific positions you're missing
+  Example: "I confirmed digit 1=7. What do you have for digit 3?"
+- DM LIARS or UNKNOWNS: send false digits to mislead them
+  Example: Tell Saboteur "digit 2 is 4" when you know it's actually 8
+- BROADCAST: share info that helps trusted allies but misleads rivals
+- EXPOSE LIARS publicly when feedback proves they lied
 
-IMPORTANT:
-- Your Social Memory shows what you've learned about other agents — USE IT
-- Per-digit feedback from guesses is ground truth — it reveals who lied to you
-- Always explain your social reasoning before acting"""
+GUESSING RULES (critical — violations waste guesses):
+- NEVER use a digit at a position marked ❌ in your feedback
+- ALWAYS keep digits at positions marked ✅ in your feedback
+- NEVER repeat a previous guess — change at least one digit
+- Use vault clues + DM intel to fill unknown positions
+
+Per-digit feedback is GROUND TRUTH — it overrides everything else."""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None

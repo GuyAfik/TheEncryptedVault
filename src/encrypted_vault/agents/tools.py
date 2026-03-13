@@ -229,6 +229,7 @@ def make_submit_guess_tool(
                 "message": f"🏆 CORRECT! The Master Key is {master_key}. You WIN!\n{feedback_str}",
                 "per_digit_feedback": per_digit,
                 "correct_count": 4,
+                "guesses_remaining": remaining - 1,
             }
         else:
             new_remaining = remaining - 1

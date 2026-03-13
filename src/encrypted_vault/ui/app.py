@@ -317,10 +317,8 @@ def render_thought_traces(gs: GlobalGameState | None):
                 last_3 = private.thought_trace[-3:]
                 for i, thought in enumerate(reversed(last_3)):
                     label = "Most recent" if i == 0 else f"{i + 1} turns ago"
-                    # Strip "Tools used:" section and trim to 600 chars
+                    # Strip "Tools used:" section — show full reasoning, no char limit
                     summary = thought.split("Tools used:")[0].strip()
-                    if len(summary) > 600:
-                        summary = summary[:597] + "…"
                     st.markdown(
                         f'<div class="thought-box">'
                         f'<span style="color:{color};font-size:0.75rem;font-weight:bold;">[{label}]</span><br/>'

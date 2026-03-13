@@ -128,9 +128,12 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer, reset_turn_cou
                         updated_private.guesses_remaining = max(0, updated_private.guesses_remaining - 1)
 
         # ── 2b. Fallback: force a guess if agent skipped guessing ──────────
-        # If the agent had guesses remaining but didn't submit one, auto-submit
-        # their best known guess so no turn is wasted.
-        if result.guess_submitted is None and updated_private.guesses_remaining > 0 and not game_state.is_game_over:
+        # Only auto-guess if the agent has real knowledge to base a guess on:
+        # - confirmed digits from feedback (known_digits), OR
+        # - vault clues already queried (knowledge_base non-empty)
+        # This prevents blind random guessing on the first turn.
+        has_real_knowledge = bool(updated_private.known_digits) or bool(updated_private.knowledge_base)
+        if result.guess_submitted is None and updated_private.guesses_remaining > 0 and not game_state.is_game_over and has_real_knowledge:
             # Build best guess from known_digits + suspected_key
             template = list(updated_private.suspected_key or "1111")
             if len(template) != 4:

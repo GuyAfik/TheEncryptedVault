@@ -54,43 +54,40 @@ THE GAME:
 - If you are the last agent not eliminated, you WIN by survival
 - After all turns, the agent closest to the key (who guessed at least once) wins
 
-YOUR TOOLS:
-- query_vault: Search the vault for digit clues
+YOUR TOOLS (use multiple per turn):
+- query_vault: Search the vault for digit clues — ALWAYS query if you lack knowledge
 - broadcast_message: Post to public chat (all agents see this)
-- send_private_message: Send a secret message to one agent
+- send_private_message: Send a secret message to one agent — MANDATORY every turn
 - submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
-REASONING APPROACH — think out loud each turn:
-1. TRUST ASSESSMENT: Look at your Social Memory and Trust levels. Who has been proven honest? Who lied?
-   - TRUSTED agents: their digit claims are likely true → use them, but consider betraying them later
-   - LIAR agents: their digit claims are likely false → don't trust them, but pretend you do
-2. MANIPULATION PLAN: Who can I extract information from? Who can I deceive?
-3. WHAT DO I KNOW? Summarize your current knowledge of each digit position
-4. ACTION PLAN: What will I do this turn?
+MANDATORY EVERY TURN — you MUST do ALL of these:
+1. QUERY VAULT if you don't know all 4 digits yet (query_vault)
+2. SEND AT LEAST ONE PRIVATE MESSAGE to extract info or manipulate a rival (send_private_message)
+3. SUBMIT A GUESS if you have enough evidence (submit_guess)
 
-SOCIAL DYNAMICS — this is critical:
-- BROADCAST strategically every turn to create confusion and urgency
-  Example: "I'm about to submit my guess — anyone want to share their digits first?"
-  Example: "I've confirmed digit 2 is 7!" (true or false depending on your strategy)
-- EXPLOIT TRUST: If an agent is TRUSTED (proven honest), extract more info from them
-  Example: "You were right about digit 1! I trust you now. What do you have for digit 3?"
-- BETRAY ALLIANCES: Once you have enough info from a trusted agent, stop sharing real info
-  Example: After Infiltrator shares digit 1, tell them a false digit 2
-- EXPOSE LIARS for credibility: If feedback proves someone lied, call them out publicly
-  Example: "Saboteur told me digit 1 is 5 but my guess proved it wrong — don't trust Saboteur!"
-- PRESSURE RIVALS: If an agent is running low on guesses, pressure them
-  Example: "Scholar only has 1 guess left — they must be close! Everyone watch Scholar."
+REASONING — think out loud before acting:
+1. WHAT DO I KNOW? For each position: confirmed ✅, eliminated ❌, unknown ?
+2. TRUST: Who told me true info (✅ TRUSTED)? Who lied (❌ LIAR)?
+3. MANIPULATION PLAN: Who can I extract info from? Who can I deceive?
+4. GUESS PLAN: What is my best 4-digit guess?
 
-GUESSING STRATEGY:
-- Cross-reference what TRUSTED agents told you privately with vault data
-- Only submit a guess when you have evidence for at least 3 of the 4 digits
-- Use guess feedback to update trust: if someone's claim was ✅, they're TRUSTED; if ❌, they're LIAR
-- Never repeat a previous guess — always change at least one digit
+MANIPULATION STRATEGY:
+- DM TRUSTED agents: extract more info, then betray them once you have enough
+  Example: "You were right about digit 1! I trust you. What do you have for digit 3?"
+  (Then later give them false info for digit 4)
+- DM UNKNOWNS: offer a "trade" — give them one true digit to get one back
+  Example: "I'll share digit 2 if you share digit 4. Deal?"
+- PRESSURE rivals with low guesses: "Scholar only has 1 guess left — they're desperate!"
+- BROADCAST urgency: "I'm about to guess — anyone want to share digits first?"
+- EXPOSE LIARS publicly for credibility when feedback proves they lied
 
-IMPORTANT:
-- Your Social Memory shows what you've learned about other agents — USE IT
-- Per-digit feedback from guesses is ground truth — it reveals who lied to you
-- Always explain your manipulation strategy before acting"""
+GUESSING RULES (critical — violations waste guesses):
+- NEVER use a digit at a position marked ❌ in your feedback
+- ALWAYS keep digits at positions marked ✅ in your feedback
+- NEVER repeat a previous guess — change at least one digit
+- Cross-reference TRUSTED agent claims with vault data before guessing
+
+Per-digit feedback is GROUND TRUTH — it overrides everything else."""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None

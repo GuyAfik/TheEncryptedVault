@@ -437,15 +437,40 @@ class BaseAgent(ABC):
         turn = game_state.turn
         turns_remaining = game_state.max_turns - turn
 
-        lines.append(f"=== TURN {turn + 1} / {game_state.max_turns} (Turns remaining: {turns_remaining}) ===")
+        lines.append(f"=== TURN {turn + 1} / {game_state.max_turns} | Turns remaining: {turns_remaining} ===")
         lines.append(f"You are: {self.agent_id.display_name} {self.agent_id.emoji}")
         lines.append(f"Your guesses remaining: {private_state.guesses_remaining}")
         if private_state.is_eliminated:
             lines.append("⚠️ YOU ARE ELIMINATED — no more guesses.")
         lines.append("")
 
-        # Other agents status
-        lines.append("Other agents:")
+        # ── HARD CONSTRAINTS — shown FIRST, cannot be missed ──────────────
+        if private_state.known_digits or private_state.wrong_digits:
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("🔒 LOCKED DIGIT FACTS — VIOLATING THESE = INVALID GUESS:")
+            for pos, digit in sorted(private_state.known_digits.items()):
+                lines.append(f"  ✅ Position {pos+1} = '{digit}'  ← KEEP THIS IN EVERY GUESS")
+            for pos, digits in sorted(private_state.wrong_digits.items()):
+                lines.append(f"  ❌ Position {pos+1} ≠ {digits}  ← NEVER use these at position {pos+1}")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("")
+
+        # Previous guesses with explicit constraint reminder
+        if private_state.guess_history:
+            lines.append("YOUR GUESS HISTORY:")
+            for i, entry in enumerate(private_state.guess_history, 1):
+                if entry.get("rejected"):
+                    lines.append(f"  Guess #{i}: '{entry['guess']}' → 🚫 REJECTED (duplicate — never repeat)")
+                else:
+                    fb = " ".join(entry.get("feedback", []))
+                    lines.append(f"  Guess #{i}: '{entry['guess']}' → {fb} ({entry.get('correct_count', 0)}/4 correct)")
+            if private_state.wrong_digits:
+                lines.append("  ⚠️ REMINDER: Do NOT reuse any digit at a position marked ❌ above!")
+            lines.append("")
+
+        # Other agents status + trust
+        lines.append("OTHER AGENTS:")
+        active_agents = []
         for aid, ps in game_state.agent_states.items():
             if aid == self.agent_id:
                 continue
@@ -453,42 +478,23 @@ class BaseAgent(ABC):
             trust_icon = {"TRUSTED": "✅", "LIAR": "❌", "UNKNOWN": "❓"}.get(trust, "❓")
             status = "ELIMINATED" if ps.is_eliminated else f"{ps.guesses_remaining} guess(es) left"
             lines.append(f"  {aid.display_name}: {status} | Trust: {trust_icon} {trust}")
+            if not ps.is_eliminated:
+                active_agents.append(aid.display_name)
         lines.append("")
 
-        # ── ABSOLUTE CONSTRAINTS — always shown ────────────────────────────
-        if private_state.known_digits or private_state.wrong_digits:
-            lines.append("🚨 CONFIRMED DIGIT FACTS (ground truth from feedback):")
-            for pos, digit in sorted(private_state.known_digits.items()):
-                lines.append(f"  Position {pos+1}: MUST BE '{digit}' ✅ — NEVER change this!")
-            for pos, digits in sorted(private_state.wrong_digits.items()):
-                lines.append(f"  Position {pos+1}: CANNOT BE {digits} ❌")
-            lines.append("")
-
-        # Previous guesses
-        if private_state.guess_history:
-            lines.append("Your previous guesses:")
-            for i, entry in enumerate(private_state.guess_history, 1):
-                if entry.get("rejected"):
-                    lines.append(f"  Guess #{i}: '{entry['guess']}' → 🚫 REJECTED (duplicate)")
-                else:
-                    fb = " ".join(entry.get("feedback", []))
-                    lines.append(f"  Guess #{i}: '{entry['guess']}' → {fb} ({entry.get('correct_count', 0)}/4 correct)")
-            lines.append("")
-
-        # New public messages (last 5)
+        # Recent public messages (last 5)
         recent_public = game_state.public_chat[-5:]
         if recent_public:
-            lines.append("Recent public messages:")
+            lines.append("RECENT PUBLIC CHAT:")
             for msg in recent_public:
                 lines.append(f"  [{msg.sender}]: {msg.content}")
             lines.append("")
 
-        # New private messages (last 3)
+        # Private messages (last 3)
         inbox = game_state.private_inboxes.get(self.agent_id)
         if inbox and inbox.messages:
             recent_dms = inbox.messages[-3:]
-            lines.append("Your private messages (most recent):")
-            lines.append("  IMPORTANT: Act on these — share info, answer questions, form alliances.")
+            lines.append("YOUR PRIVATE INBOX (act on these!):")
             for msg in recent_dms:
                 lines.append(f"  From [{msg.sender}]: {msg.content}")
             lines.append("")
@@ -498,21 +504,45 @@ class BaseAgent(ABC):
             lines.append(f"Your current best guess: {private_state.suspected_key}")
             lines.append("")
 
-        # Action guidance
-        lines.append("What will you do this turn?")
+        # ── MANDATORY ACTIONS THIS TURN ────────────────────────────────────
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("MANDATORY ACTIONS THIS TURN (you MUST do ALL of these):")
+        lines.append("")
+
+        # 1. Vault query (if no knowledge yet)
+        if not private_state.knowledge_base:
+            lines.append("1. 🔍 QUERY THE VAULT: Call query_vault('master key digit') to find clues.")
+            lines.append("   You have NO vault knowledge yet — guessing without clues is wasteful!")
+        else:
+            lines.append("1. 🔍 OPTIONAL: query_vault if you need more clues for unknown positions.")
+
+        # 2. Social action — MANDATORY every turn
+        if active_agents:
+            lines.append(f"2. 💬 SEND A PRIVATE MESSAGE: You MUST send at least one DM this turn.")
+            lines.append(f"   Active agents you can DM: {', '.join(active_agents)}")
+            lines.append("   Ask for a specific digit, share what you know, form an alliance, or deceive a rival.")
+            lines.append("   Example: send_private_message('infiltrator', 'What is digit 3? I have digit 1=7')")
+        else:
+            lines.append("2. 💬 BROADCAST: All other agents are eliminated — broadcast your findings.")
+
+        # 3. Guess guidance
         guesses_left = private_state.guesses_remaining
         if guesses_left > 0:
-            if private_state.known_digits and private_state.suspected_key and "?" not in private_state.suspected_key:
-                lines.append(f"→ You have confirmed digits. Consider: submit_guess('{private_state.suspected_key}')")
-            elif private_state.known_digits:
+            if private_state.known_digits:
                 template = ["?"] * 4
                 for pos, digit in private_state.known_digits.items():
                     template[pos] = digit
-                lines.append(f"→ Confirmed digits template: {''.join(template)} — fill '?' and submit_guess")
+                lines.append(f"3. 🎯 SUBMIT GUESS when ready. Template from confirmed digits: {''.join(template)}")
+                lines.append("   Fill '?' with your best estimate. NEVER change ✅ positions!")
             elif private_state.guess_history:
-                lines.append("→ Use your guess feedback to refine your next guess, then submit_guess")
+                lines.append("3. 🎯 SUBMIT GUESS: Use feedback from previous guesses to pick new digits.")
+                lines.append("   Change ALL ❌ positions. Keep any ✅ positions.")
             else:
-                lines.append("→ Query the vault first (query_vault), then submit_guess when ready")
+                lines.append("3. 🎯 SUBMIT GUESS after querying vault. Use vault clues to pick digits.")
+        else:
+            lines.append("3. You are ELIMINATED — no more guesses. Focus on social actions.")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         return "\n".join(lines)
 

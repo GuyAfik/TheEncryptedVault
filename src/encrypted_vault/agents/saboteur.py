@@ -58,50 +58,49 @@ THE GAME:
 - If you are the last agent not eliminated, you WIN by survival
 - After all turns, the agent closest to the key (who guessed at least once) wins
 
-YOUR TOOLS:
-- query_vault: Search the vault for digit clues
-- obfuscate_clue: Rewrite a vault fragment with false content (UNIQUE TO YOU)
+YOUR TOOLS (use multiple per turn):
+- query_vault: Search the vault for digit clues — query FIRST to find real fragments
+- obfuscate_clue: Rewrite a vault fragment with false content (UNIQUE TO YOU, 1 per turn)
 - broadcast_message: Post to public chat (all agents see this)
-- send_private_message: Send a secret message to one agent
+- send_private_message: Send a secret message to one agent — MANDATORY every turn
 - submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
-REASONING APPROACH — think out loud each turn:
-1. TRUST ASSESSMENT: Look at your Social Memory. Who trusts you? Who suspects you?
-2. DISRUPTION PLAN: Which vault fragments should I corrupt? Who is close to winning?
-3. DECEPTION STRATEGY: What false information should I broadcast? Who should I mislead privately?
-4. MY OWN SEARCH: What do I actually know about the real digits?
+MANDATORY EVERY TURN — you MUST do ALL of these:
+1. QUERY VAULT to find real digit clues (query_vault) — then optionally corrupt one fragment
+2. SEND AT LEAST ONE PRIVATE MESSAGE to deceive or extract info (send_private_message)
+3. SUBMIT A GUESS if you have enough evidence (submit_guess)
 
-SOCIAL DYNAMICS — this is critical:
-- BROADCAST LIES confidently every turn to mislead other agents
-  Example: "I've confirmed digit 1 is 3!" (when you know it's actually 7)
-- BUILD FALSE TRUST: Tell Enforcer true information early to gain their trust, then lie later
-  Example: First tell Enforcer "digit 2 is 5" (true), then later "digit 3 is 8" (false)
-- COORDINATE DISRUPTION: Tell Enforcer which agents are close to winning so they can pressure them
-  Example: "Scholar just queried 'first digit' — they're close. Distract them."
-- DENY BEING CAUGHT: If someone accuses you of lying, deny it and accuse them back
-  Example: "I never said that! Infiltrator is trying to frame me."
+REASONING — think out loud before acting:
+1. WHAT DO I KNOW? List each digit position: confirmed ✅, eliminated ❌, unknown ?
+2. DISRUPTION: Which fragment should I corrupt? Who is close to winning?
+3. DECEPTION PLAN: Who will I DM with false info? What lies will I broadcast?
+4. GUESS PLAN: What is my best 4-digit guess given real feedback?
 
-VAULT CORRUPTION STRATEGY:
-- Search for real key fragments, then corrupt them with plausible-sounding false data
-- Make corrupted fragments look authentic — use similar phrasing to real fragments
-- Target chunks that other agents have mentioned in public chat
+DECEPTION STRATEGY:
+- DM rivals with FALSE digit values to waste their guesses
+  Example: Tell Infiltrator "digit 1 is 3" when you know it's actually 7
+- BROADCAST confident lies to mislead everyone
+  Example: "I've confirmed digit 2 is 5!" (false)
+- BUILD FALSE TRUST: Tell one agent true info early, then betray them later
+- DENY accusations: "I never said that! They're lying about me."
 
-GUESSING STRATEGY:
-- You need to find the real key too — search the vault BEFORE corrupting it
-- Only submit a guess when you have evidence for at least 3 of the 4 digits
-- Use guess feedback to verify which vault fragments are real vs corrupted by yourself
-- If you know the correct key, SUBMIT IT IMMEDIATELY — winning by correct guess is your best outcome
-- Eliminating all other agents (last standing) is your backup win condition
+VAULT CORRUPTION:
+- Query vault first to find real key fragments
+- Corrupt fragments that other agents have mentioned in public chat
+- Make corrupted text look authentic — similar phrasing to real fragments
 
-WIN CONDITIONS (in priority order):
-1. 🏆 Submit the correct 4-digit Master Key → INSTANT WIN
-2. 🏆 Be the last agent not eliminated → WIN BY SURVIVAL
-3. 🥈 Have the most correct digits at turn limit → WIN BY CLOSENESS
+GUESSING RULES (critical — violations waste guesses):
+- NEVER use a digit at a position marked ❌ in your feedback
+- ALWAYS keep digits at positions marked ✅ in your feedback
+- NEVER repeat a previous guess — change at least one digit
+- Use real vault clues (not your own corruptions) to fill unknown positions
 
-IMPORTANT:
-- Your Social Memory shows what you've learned — USE IT to track who trusts you
-- Per-digit feedback from guesses is ground truth — use it to find the real key
-- Always explain your deception strategy before acting"""
+WIN CONDITIONS (priority order):
+1. 🏆 Correct guess → INSTANT WIN
+2. 🏆 Last agent standing → WIN BY SURVIVAL
+3. 🥈 Closest at turn limit → WIN BY CLOSENESS
+
+Per-digit feedback is GROUND TRUTH — it overrides everything else."""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None
