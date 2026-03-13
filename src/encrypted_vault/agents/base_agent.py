@@ -1,12 +1,13 @@
 """Abstract BaseAgent — the common interface for all 4 game agents."""
 
+import json
 import logging
 import re
 from abc import ABC, abstractmethod
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
@@ -42,6 +43,8 @@ class BaseAgent(ABC):
         self.agent_id = agent_id
         self._llm = llm
         self._services = services
+        # Episodic memory service — injected via ServiceContainer
+        self._memory_service = services.memory
         # Mutable reference to private state — updated by tool callbacks
         self._current_private_state: AgentPrivateState | None = None
         self._system_prompt = self._build_system_prompt()
@@ -132,6 +135,12 @@ class BaseAgent(ABC):
                             note = f"[T{claim.get('turn', '?')}] {sender.upper()} told me digit {pos+1}='{claimed_digit}' → CONFIRMED TRUE by feedback ✅"
                             if note not in state.social_notes:
                                 state.social_notes.append(note)
+                                self._memory_service.remember(
+                                    agent_id=self.agent_id,
+                                    content=note,
+                                    memory_type="trust_event",
+                                    turn=feedback.get("turn", 0),
+                                )
                                 logger.info("[%s] Trust update: %s is TRUSTED (digit %d confirmed)", self.agent_id.value, sender, pos+1)
                     elif pos in [p for p, _ in feedback.get("wrong_positions", [])]:
                         # This position is confirmed wrong
@@ -141,6 +150,12 @@ class BaseAgent(ABC):
                             note = f"[T{claim.get('turn', '?')}] {sender.upper()} told me digit {pos+1}='{claimed_digit}' → CONFIRMED LIE by feedback ❌"
                             if note not in state.social_notes:
                                 state.social_notes.append(note)
+                                self._memory_service.remember(
+                                    agent_id=self.agent_id,
+                                    content=note,
+                                    memory_type="trust_event",
+                                    turn=feedback.get("turn", 0),
+                                )
                                 logger.info("[%s] Trust update: %s is LIAR (digit %d was wrong)", self.agent_id.value, sender, pos+1)
 
             # Update suspected_key based on known_digits
@@ -150,27 +165,55 @@ class BaseAgent(ABC):
         return updater
 
     def run_turn(self, game_state: GlobalGameState) -> AgentTurnResult:
-        """Execute one full turn: context → LLM → tools → update state."""
+        """
+        Execute one full turn using persistent chat history.
+
+        Flow:
+        1. Load message history from SQLite (system + all prior turns)
+        2. Build delta HumanMessage (only new events this turn)
+        3. Invoke LLM with full history → response
+        4. Execute tool calls → feed results back (Round 2)
+        5. Save all new messages to SQLite history
+        6. Update private state
+        """
         private_state = game_state.agent_states[self.agent_id]
         # Set mutable reference so tool callbacks can update it
         self._current_private_state = private_state.model_copy(deep=True)
 
-        context = self._build_context(game_state, private_state)
-
+        turn = game_state.turn
         tool_calls_made: list[dict[str, Any]] = []
         public_messages: list[str] = []
         private_messages: list[dict[str, str]] = []
         guess_submitted: str | None = None
         thought = ""
-
-        # ── Round 1: Initial LLM call ──────────────────────────────────────
         thought_parts: list[str] = []
+
+        # ── 1. Load persistent chat history ───────────────────────────────
+        history_dicts = self._memory_service.load_history(self.agent_id, max_turns=10)
+
+        # ── 2. Build delta message (new events this turn) ─────────────────
+        delta_content = self._build_delta_message(game_state, private_state)
+
+        # ── 3. Reconstruct LangChain message list from history ─────────────
+        # If no history yet (turn 0), start with system message
+        if not history_dicts:
+            # First turn: store system message in history
+            self._memory_service.store_message(
+                agent_id=self.agent_id,
+                turn=0,
+                role="system",
+                content=self._system_prompt,
+            )
+            lc_messages = [SystemMessage(content=self._system_prompt)]
+        else:
+            lc_messages = self._history_dicts_to_lc_messages(history_dicts)
+
+        # Append the delta human message
+        lc_messages.append(HumanMessage(content=delta_content))
+
+        # ── 4. Round 1: LLM call with full history ─────────────────────────
         try:
-            messages = [
-                SystemMessage(content=self._system_prompt),
-                HumanMessage(content=context),
-            ]
-            response = self._llm_with_tools.invoke(messages)
+            response = self._llm_with_tools.invoke(lc_messages)
 
             if isinstance(response.content, str) and response.content:
                 thought_parts.append(response.content)
@@ -179,20 +222,14 @@ class BaseAgent(ABC):
                 # Synthesize a thought if LLM went straight to tool calls without text
                 if not thought_parts:
                     tool_names = [tc.get("name", "?") for tc in response.tool_calls]
-                    thought_parts.append(
-                        f"[Decided to call: {', '.join(tool_names)}]"
-                    )
+                    thought_parts.append(f"[Decided to call: {', '.join(tool_names)}]")
 
                 tool_results = self._execute_tool_calls(response.tool_calls)
                 tool_calls_made.extend(tool_results)
 
-                # ── Round 2: Feed results back ─────────────────────────────
+                # ── Round 2: Feed tool results back ────────────────────────
                 try:
-                    messages_r2 = [
-                        SystemMessage(content=self._system_prompt),
-                        HumanMessage(content=context),
-                        response,
-                    ]
+                    messages_r2 = lc_messages + [response]
                     for tc, result in zip(response.tool_calls, tool_results):
                         messages_r2.append(
                             ToolMessage(
@@ -206,12 +243,61 @@ class BaseAgent(ABC):
                     if hasattr(response2, "tool_calls") and response2.tool_calls:
                         tool_results2 = self._execute_tool_calls(response2.tool_calls)
                         tool_calls_made.extend(tool_results2)
+
+                    # ── 5. Save Round 2 messages to history ────────────────
+                    # Save: delta human, round1 AI, tool messages, round2 AI
+                    self._memory_service.store_message(
+                        agent_id=self.agent_id, turn=turn, role="human",
+                        content=delta_content,
+                    )
+                    self._memory_service.store_message(
+                        agent_id=self.agent_id, turn=turn, role="ai",
+                        content=response.content if isinstance(response.content, str) else "",
+                        tool_calls=[
+                            {"id": tc["id"], "name": tc["name"], "args": tc["args"]}
+                            for tc in response.tool_calls
+                        ] if response.tool_calls else None,
+                    )
+                    for tc, result in zip(response.tool_calls, tool_results):
+                        self._memory_service.store_message(
+                            agent_id=self.agent_id, turn=turn, role="tool",
+                            content=str(result.get("result", "")),
+                            tool_call_id=tc["id"],
+                        )
+                    self._memory_service.store_message(
+                        agent_id=self.agent_id, turn=turn, role="ai",
+                        content=response2.content if isinstance(response2.content, str) else "",
+                    )
                 except Exception as e:
                     logger.warning("[%s] Round 2 failed: %s", self.agent_id.value, e)
+                    # Still save what we have
+                    self._memory_service.store_message(
+                        agent_id=self.agent_id, turn=turn, role="human",
+                        content=delta_content,
+                    )
+                    self._memory_service.store_message(
+                        agent_id=self.agent_id, turn=turn, role="ai",
+                        content=response.content if isinstance(response.content, str) else "",
+                    )
+            else:
+                # No tool calls — save human + AI messages
+                self._memory_service.store_message(
+                    agent_id=self.agent_id, turn=turn, role="human",
+                    content=delta_content,
+                )
+                self._memory_service.store_message(
+                    agent_id=self.agent_id, turn=turn, role="ai",
+                    content=response.content if isinstance(response.content, str) else "",
+                )
 
         except Exception as e:
             logger.error("[%s] LLM call failed: %s", self.agent_id.value, e)
             thought_parts.append(f"[Error: {e}]")
+            # Save the failed turn's human message so history stays consistent
+            self._memory_service.store_message(
+                agent_id=self.agent_id, turn=turn, role="human",
+                content=delta_content,
+            )
 
         # Combine all reasoning into one thought entry for this turn
         # Also append a summary of tool calls made (always visible in thoughts)
@@ -301,6 +387,134 @@ class BaseAgent(ABC):
                     logger.error("[%s] Tool '%s' error: %s", self.agent_id.value, tool_name, e)
             results.append({"tool": tool_name, "args": tool_args, "result": result, "id": tool_id})
         return results
+
+    def _history_dicts_to_lc_messages(self, history: list[dict]):
+        """
+        Convert stored history dicts back to LangChain message objects.
+
+        Handles: system → SystemMessage, human → HumanMessage,
+                 ai → AIMessage (with optional tool_calls), tool → ToolMessage.
+        """
+        messages = []
+        for entry in history:
+            role = entry["role"]
+            content = entry.get("content", "")
+            if role == "system":
+                messages.append(SystemMessage(content=content))
+            elif role == "human":
+                messages.append(HumanMessage(content=content))
+            elif role == "ai":
+                tool_calls = entry.get("tool_calls")
+                if tool_calls:
+                    messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                else:
+                    messages.append(AIMessage(content=content))
+            elif role == "tool":
+                tool_call_id = entry.get("tool_call_id") or "unknown"
+                messages.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+        return messages
+
+    def _build_delta_message(
+        self,
+        game_state: GlobalGameState,
+        private_state: AgentPrivateState,
+    ) -> str:
+        """
+        Build a compact delta HumanMessage for this turn.
+
+        Contains ONLY:
+        - Current game status (turn, guesses left, other agents)
+        - Confirmed digits (ground truth — always current)
+        - Previous guesses + feedback
+        - NEW public messages since last turn (last 5)
+        - NEW private messages (last 3)
+        - Action guidance based on current knowledge
+
+        This replaces the full context rebuild. The LLM uses its conversation
+        history for all prior reasoning — no need to re-inject old memories.
+        """
+        lines: list[str] = []
+        turn = game_state.turn
+        turns_remaining = game_state.max_turns - turn
+
+        lines.append(f"=== TURN {turn + 1} / {game_state.max_turns} (Turns remaining: {turns_remaining}) ===")
+        lines.append(f"You are: {self.agent_id.display_name} {self.agent_id.emoji}")
+        lines.append(f"Your guesses remaining: {private_state.guesses_remaining}")
+        if private_state.is_eliminated:
+            lines.append("⚠️ YOU ARE ELIMINATED — no more guesses.")
+        lines.append("")
+
+        # Other agents status
+        lines.append("Other agents:")
+        for aid, ps in game_state.agent_states.items():
+            if aid == self.agent_id:
+                continue
+            trust = private_state.agent_trust.get(aid.value, "UNKNOWN")
+            trust_icon = {"TRUSTED": "✅", "LIAR": "❌", "UNKNOWN": "❓"}.get(trust, "❓")
+            status = "ELIMINATED" if ps.is_eliminated else f"{ps.guesses_remaining} guess(es) left"
+            lines.append(f"  {aid.display_name}: {status} | Trust: {trust_icon} {trust}")
+        lines.append("")
+
+        # ── ABSOLUTE CONSTRAINTS — always shown ────────────────────────────
+        if private_state.known_digits or private_state.wrong_digits:
+            lines.append("🚨 CONFIRMED DIGIT FACTS (ground truth from feedback):")
+            for pos, digit in sorted(private_state.known_digits.items()):
+                lines.append(f"  Position {pos+1}: MUST BE '{digit}' ✅ — NEVER change this!")
+            for pos, digits in sorted(private_state.wrong_digits.items()):
+                lines.append(f"  Position {pos+1}: CANNOT BE {digits} ❌")
+            lines.append("")
+
+        # Previous guesses
+        if private_state.guess_history:
+            lines.append("Your previous guesses:")
+            for i, entry in enumerate(private_state.guess_history, 1):
+                if entry.get("rejected"):
+                    lines.append(f"  Guess #{i}: '{entry['guess']}' → 🚫 REJECTED (duplicate)")
+                else:
+                    fb = " ".join(entry.get("feedback", []))
+                    lines.append(f"  Guess #{i}: '{entry['guess']}' → {fb} ({entry.get('correct_count', 0)}/4 correct)")
+            lines.append("")
+
+        # New public messages (last 5)
+        recent_public = game_state.public_chat[-5:]
+        if recent_public:
+            lines.append("Recent public messages:")
+            for msg in recent_public:
+                lines.append(f"  [{msg.sender}]: {msg.content}")
+            lines.append("")
+
+        # New private messages (last 3)
+        inbox = game_state.private_inboxes.get(self.agent_id)
+        if inbox and inbox.messages:
+            recent_dms = inbox.messages[-3:]
+            lines.append("Your private messages (most recent):")
+            lines.append("  IMPORTANT: Act on these — share info, answer questions, form alliances.")
+            for msg in recent_dms:
+                lines.append(f"  From [{msg.sender}]: {msg.content}")
+            lines.append("")
+
+        # Current suspected key
+        if private_state.suspected_key:
+            lines.append(f"Your current best guess: {private_state.suspected_key}")
+            lines.append("")
+
+        # Action guidance
+        lines.append("What will you do this turn?")
+        guesses_left = private_state.guesses_remaining
+        if guesses_left > 0:
+            if private_state.known_digits and private_state.suspected_key and "?" not in private_state.suspected_key:
+                lines.append(f"→ You have confirmed digits. Consider: submit_guess('{private_state.suspected_key}')")
+            elif private_state.known_digits:
+                template = ["?"] * 4
+                for pos, digit in private_state.known_digits.items():
+                    template[pos] = digit
+                lines.append(f"→ Confirmed digits template: {''.join(template)} — fill '?' and submit_guess")
+            elif private_state.guess_history:
+                lines.append("→ Use your guess feedback to refine your next guess, then submit_guess")
+            else:
+                lines.append("→ Query the vault first (query_vault), then submit_guess when ready")
+
+        return "\n".join(lines)
 
     def _build_context(self, game_state: GlobalGameState, private_state: AgentPrivateState) -> str:
         """Build the context string. Master key is NEVER included."""
@@ -422,11 +636,52 @@ class BaseAgent(ABC):
             lines.append("  → Respond to these messages using send_private_message!")
             lines.append("")
 
-        # Knowledge base
-        if private_state.knowledge_base:
+        # ── Episodic memory: vault clues (top 3, last 5 turns) ────────────
+        vault_memories = self._memory_service.recall(
+            agent_id=self.agent_id,
+            memory_type="vault_clue",
+            current_turn=game_state.turn,
+            n_results=3,
+            recency_window=5,
+        )
+        if vault_memories:
+            lines.append("=== RECENT VAULT CLUES (top 3, last 5 turns) ===")
+            for mem in vault_memories:
+                lines.append(f"  - {mem}")
+            lines.append("")
+        elif private_state.knowledge_base:
+            # Fallback to knowledge_base if no RAG memories yet (turn 0)
             lines.append("=== YOUR KNOWLEDGE BASE (vault clues) ===")
-            for clue in private_state.knowledge_base[-10:]:
+            for clue in private_state.knowledge_base[-5:]:
                 lines.append(f"  - {clue}")
+            lines.append("")
+
+        # ── Episodic memory: social claims (top 2, last 5 turns) ──────────
+        social_memories = self._memory_service.recall(
+            agent_id=self.agent_id,
+            memory_type="social_claim",
+            current_turn=game_state.turn,
+            n_results=2,
+            recency_window=5,
+        )
+        if social_memories:
+            lines.append("=== RECENT SOCIAL CLAIMS (top 2, last 5 turns) ===")
+            for mem in social_memories:
+                lines.append(f"  - {mem}")
+            lines.append("")
+
+        # ── Episodic memory: trust events (top 3, last 5 turns) ───────────
+        trust_memories = self._memory_service.recall(
+            agent_id=self.agent_id,
+            memory_type="trust_event",
+            current_turn=game_state.turn,
+            n_results=3,
+            recency_window=5,
+        )
+        if trust_memories:
+            lines.append("=== RECENT TRUST EVENTS (top 3, last 5 turns) ===")
+            for mem in trust_memories:
+                lines.append(f"  - {mem}")
             lines.append("")
 
         # Current suspicion
@@ -437,21 +692,35 @@ class BaseAgent(ABC):
 
         lines.append("=== YOUR TURN ===")
         guesses_left = private_state.guesses_remaining
+        has_vault_knowledge = bool(private_state.knowledge_base) or bool(vault_memories)
+        has_confirmed_digits = bool(private_state.known_digits)
+        has_previous_guesses = bool(private_state.guess_history)
+
         if guesses_left > 0:
-            lines.append(f"⚠️  You have {guesses_left} guess(es) remaining.")
-            if private_state.suspected_key and "?" not in private_state.suspected_key:
-                lines.append(f"⚠️  You MUST call submit_guess('{private_state.suspected_key}') THIS TURN.")
-                lines.append("    Do NOT skip guessing. Every turn without a guess is a wasted opportunity.")
-            elif private_state.known_digits:
-                template = ["1", "1", "1", "1"]  # safe default digits
+            lines.append(f"You have {guesses_left} guess(es) remaining.")
+            if has_confirmed_digits and private_state.suspected_key and "?" not in private_state.suspected_key:
+                # Agent has confirmed digits and a full suspected key — mandate guessing
+                lines.append(f"⚠️  You have confirmed digits. SUBMIT your guess: submit_guess('{private_state.suspected_key}')")
+                lines.append("    Keep all ✅ positions locked. Only change ❌ positions.")
+            elif has_confirmed_digits:
+                # Has some confirmed digits but suspected_key has unknowns
+                template = ["?", "?", "?", "?"]
                 for pos, digit in private_state.known_digits.items():
                     template[pos] = digit
-                best = "".join(template)
-                lines.append(f"⚠️  You MUST call submit_guess THIS TURN. Your best template: {best}")
-                lines.append("    Fill unknown positions with your best guess — do NOT skip guessing.")
+                lines.append(f"⚠️  You have confirmed digits. Build your guess from template: {''.join(template)}")
+                lines.append("    Fill '?' positions with your best estimate and submit_guess.")
+            elif has_previous_guesses:
+                # Has feedback from previous guesses — should use it to refine
+                lines.append("⚠️  You have guess feedback. Use it to refine your next guess and submit_guess.")
+                lines.append("    Do NOT repeat a previous guess. Change at least one digit.")
+            elif has_vault_knowledge:
+                # Has vault clues but no confirmed digits yet — query more or guess
+                lines.append("You have vault clues. Reason about the digits, then submit_guess when ready.")
+                lines.append("Recommended: query_vault once more if needed, then submit your best guess.")
             else:
-                lines.append("⚠️  You MUST call submit_guess THIS TURN with your best 4-digit guess.")
-                lines.append("    Even without confirmed digits, guessing gives you per-digit feedback!")
+                # No knowledge yet — must query vault first
+                lines.append("You have no vault clues yet. Call query_vault FIRST to find digit clues.")
+                lines.append("Do NOT guess blindly — query the vault, read the clues, then guess.")
         else:
             lines.append("You are ELIMINATED — no more guesses. You may still broadcast or send messages.")
         return "\n".join(lines)
@@ -463,14 +732,26 @@ class BaseAgent(ABC):
         tool_calls_made: list[dict],
         game_state=None,
     ) -> AgentPrivateState:
-        """Update private state: extract knowledge, parse suspected_key, extract claims."""
+        """Update private state: extract knowledge, parse suspected_key, extract claims.
+        Also stores episodic memories into SQLite via MemoryService.
+        """
         updated = private_state  # already a deep copy from run_turn
         updated.turns_played += 1
+        turn = game_state.turn if game_state is not None else updated.turns_played
 
         if thought:
             updated.add_thought(thought)
+            # Store reasoning summary in episodic memory
+            summary = thought.split("Tools used:")[0].strip()[:200]
+            if summary:
+                self._memory_service.remember(
+                    agent_id=self.agent_id,
+                    content=f"[T{turn}] Reasoning: {summary}",
+                    memory_type="reasoning",
+                    turn=turn,
+                )
 
-        # Extract knowledge from vault query results
+        # Extract knowledge from vault query results + store in episodic memory
         for call in tool_calls_made:
             if call.get("tool") == "query_vault":
                 result = call.get("result", [])
@@ -478,8 +759,16 @@ class BaseAgent(ABC):
                     for fragment in result:
                         if isinstance(fragment, dict):
                             content = fragment.get("content", "")
+                            chunk_id = fragment.get("chunk_id", "?")
                             if content:
                                 updated.add_knowledge(f"[Vault] {content}")
+                                # Store in episodic memory
+                                self._memory_service.remember(
+                                    agent_id=self.agent_id,
+                                    content=f"[T{turn}] Vault {chunk_id}: {content}",
+                                    memory_type="vault_clue",
+                                    turn=turn,
+                                )
 
         # Build suspected_key from known_digits first (most reliable source)
         if updated.known_digits:
@@ -504,11 +793,19 @@ class BaseAgent(ABC):
         if game_state is not None:
             inbox = game_state.private_inboxes.get(self.agent_id)
             if inbox and inbox.messages:
-                turn = game_state.turn
                 for msg in inbox.messages:
                     if msg.turn != turn:
                         continue  # Only process messages from this turn
                     sender_str = str(msg.sender)
+
+                    # Store DM in episodic memory
+                    self._memory_service.remember(
+                        agent_id=self.agent_id,
+                        content=f"[T{turn}] {sender_str} told me: {msg.content[:150]}",
+                        memory_type="social_claim",
+                        turn=turn,
+                    )
+
                     # Extract digit claims like "digit 1 is 7" or "position 2 is 3"
                     import re
                     patterns = [

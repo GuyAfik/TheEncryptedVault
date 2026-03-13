@@ -155,16 +155,20 @@ class GameRunner:
 
     def reset(self) -> "GameRunner":
         """
-        Full game reset: stop thread, wipe vault + chat, return a fresh GameRunner.
+        Full game reset: stop thread, wipe vault + chat + agent memories, return a fresh GameRunner.
         """
         logger.info("GameRunner.reset() called")
         self._stop_event.set()
 
-        # Reset services
+        # Reset vault + chat
         self._services.game.reset(
             max_turns=settings.max_turns,
             token_budget=settings.token_budget_per_agent,
         )
+
+        # Reset all agent episodic memories (ephemeral per game session)
+        self._services.memory.forget_all()
+        logger.info("Agent episodic memories cleared on reset")
 
         return GameRunner(services=self._services)
 

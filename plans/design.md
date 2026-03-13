@@ -28,6 +28,7 @@
 14. [Data Flow Diagram](#14-data-flow-diagram)
 15. [Private Messaging System](#15-private-messaging-system)
 16. [Implementation Phases](#16-implementation-phases)
+17. [Agent Memory Architecture](#17-agent-memory-architecture)
 
 ---
 
@@ -971,3 +972,325 @@ flowchart LR
 | 5 | `graph/` | Full LangGraph game loop + `GameRunner.reset()` |
 | 6 | `ui/app.py` | Streamlit dashboard with restart + agent progress panel |
 | 7 | `tests/`, `README.md` | Test coverage + documentation |
+
+---
+
+## 17. Agent Memory Architecture
+
+### 17.1 Problem Statement
+
+Every turn, [`_build_context()`](../src/encrypted_vault/agents/base_agent.py:294) reconstructs the full LLM prompt from scratch by serialising fields from [`AgentPrivateState`](../src/encrypted_vault/state/agent_models.py:8). As the game progresses, the context grows noisy:
+
+| Field | Type | Problem |
+|-------|------|---------|
+| `knowledge_base` | `list[str]` | Grows unbounded — old vault clues from turn 1 compete with recent ones |
+| `thought_trace` | `list[str]` | Only last 2 turns shown — reasoning continuity lost after turn 3 |
+| `social_notes` | `list[str]` | Flat list — no ranking by relevance or recency |
+| `claims_received` | `list[dict]` | All claims ever received — no filtering by relevance |
+
+**Symptoms observed in gameplay:** agents ignore confirmed digits, repeat vault queries, miss DM claims from trusted agents.
+
+### 17.2 Two-Layer Memory Design
+
+#### Layer 1 — Structured Facts (stays in `AgentPrivateState`)
+
+Hard facts always shown in full — ground truth from game mechanics, never retrieved by similarity:
+
+| Field | Context treatment |
+|-------|------------------|
+| `known_digits` | Always shown at TOP as ABSOLUTE CONSTRAINTS |
+| `wrong_digits` | Always shown |
+| `guess_history` | Always shown |
+| `agent_trust` | Always shown |
+| `guesses_remaining` | Always shown |
+
+#### Layer 2 — Episodic RAG Memory (new `memory/` module)
+
+Soft memories retrieved by semantic similarity each turn. Only top-N most relevant injected into context:
+
+| Memory type | Example | Stored when |
+|-------------|---------|-------------|
+| `vault_clue` | `"[T3] Vault chunk_07: The first cipher digit echoes the prime sequence..."` | After `query_vault` tool call |
+| `social_claim` | `"[T4] Infiltrator told me digit 2 = '8' (unverified)"` | After DM received |
+| `trust_event` | `"[T5] Saboteur claimed digit 1 = '3' → CONFIRMED LIE ❌"` | After guess feedback cross-references claims |
+| `reasoning` | `"[T6] Deduced digit 3 = '9' from vault + Scholar's confirmed claim"` | After each turn's thought |
+
+### 17.3 Storage: ChromaDB (recommended)
+
+ChromaDB is already in the project. One collection per agent:
+- `agent_memory_infiltrator`
+- `agent_memory_saboteur`
+- `agent_memory_scholar`
+- `agent_memory_enforcer`
+
+Each document has metadata: `{agent_id, turn, memory_type}`. Uses OpenAI `text-embedding-3-small` (~$0.002/game).
+
+**Alternative: SQLite** — no embedding cost, exact keyword search, simpler. Use if embedding cost is a concern.
+
+### 17.4 New Files
+
+```
+src/encrypted_vault/
+  memory/
+    __init__.py
+    base_memory.py          ← AbstractAgentMemory ABC
+    chroma_memory.py        ← ChromaDB implementation (1 collection per agent)
+    in_memory_memory.py     ← dict + keyword search (tests, no embeddings)
+  services/
+    memory_service.py       ← MemoryService thin wrapper
+```
+
+### 17.5 `AbstractAgentMemory` Interface
+
+```python
+class AbstractAgentMemory(ABC):
+
+    @abstractmethod
+    def store(self, agent_id: AgentID, content: str, memory_type: str, turn: int) -> None:
+        """Embed and store a memory entry for this agent."""
+
+    @abstractmethod
+    def query(self, agent_id: AgentID, query: str, n_results: int = 3, memory_type: str | None = None) -> list[str]:
+        """Retrieve top-N most relevant memories. Optionally filter by memory_type."""
+
+    @abstractmethod
+    def reset(self, agent_id: AgentID) -> None:
+        """Clear all memories for this agent (game restart)."""
+
+    @abstractmethod
+    def reset_all(self) -> None:
+        """Clear all memories for all agents."""
+```
+
+### 17.6 How `_build_context` Changes
+
+**Before** — dumps all `knowledge_base` entries (up to 20+, last 10 shown arbitrarily):
+```python
+for clue in private_state.knowledge_base[-10:]:
+    lines.append(f"  - {clue}")
+```
+
+**After** — semantic retrieval, top 3+2 most relevant:
+```python
+# Top 3 vault clues relevant to current turn
+vault_memories = self._memory_service.recall(
+    self.agent_id, "digit position clue master key cipher", n_results=3, memory_type="vault_clue"
+)
+# Top 2 social observations
+social_memories = self._memory_service.recall(
+    self.agent_id, "trust agent claim digit observation", n_results=2, memory_type="social_claim"
+)
+```
+
+**Result:** Context shrinks from ~2000 tokens to ~800 tokens. Signal-to-noise ratio improves dramatically.
+
+### 17.7 What Gets Stored Each Turn
+
+In `_update_private_state` after each turn:
+
+1. **Vault clues** — each `query_vault` result fragment
+2. **DM claims** — each private message received this turn
+3. **Trust events** — when guess feedback confirms/refutes a claim
+4. **Reasoning summary** — 200-char summary of this turn's thought
+
+### 17.8 `ServiceContainer` Changes
+
+```python
+class ServiceContainer:
+    def __init__(self, vault, chat, game, memory):
+        self.vault = vault
+        self.chat = chat
+        self.game = game
+        self.memory = memory  # MemoryService — NEW
+```
+
+`BaseAgent.__init__` reads `self._memory_service = services.memory` — no changes to agent subclasses.
+
+### 17.9 Migration Strategy
+
+| Phase | What changes | Breaking? |
+|-------|-------------|-----------|
+| **Phase 1** | Add `memory/` module + `MemoryService`; store to RAG alongside existing `knowledge_base` | ❌ No |
+| **Phase 2** | Switch `_build_context` to query RAG instead of reading `knowledge_base` | ❌ No (keep `knowledge_base` as audit log) |
+| **Phase 3** | Remove `knowledge_base`, `social_notes`, `claims_received` from `AgentPrivateState` | ✅ Yes (tests need update) |
+
+### 17.10 Dependency Graph (after upgrade)
+
+```mermaid
+graph TD
+    UI[Streamlit UI] --> Runner[GameRunner]
+    Runner --> Builder[GameGraphBuilder]
+    Builder --> Agents[4 Agents]
+    Builder --> SC[ServiceContainer]
+    SC --> VS[VaultService]
+    SC --> CS[ChatService]
+    SC --> GS[GameService]
+    SC --> MS[MemoryService]
+    VS --> VaultRepo[AbstractVaultRepository]
+    MS --> MemRepo[AbstractAgentMemory]
+    VaultRepo --> ChromaVault[ChromaVaultRepository]
+    VaultRepo --> InMemVault[InMemoryVaultRepository]
+    MemRepo --> ChromaMem[ChromaAgentMemory]
+    MemRepo --> InMemMem[InMemoryAgentMemory]
+    Agents --> SC
+```
+
+### 17.11 Open Questions — RESOLVED
+
+| Question | Decision |
+|----------|---------|
+| Embedding cost | **No embeddings** — use SQLite with keyword + recency retrieval |
+| Persistent vs ephemeral | **Ephemeral** — reset on game restart via `reset_all()` |
+| `knowledge_base` removal | **Keep** as UI audit log in `AgentPrivateState` |
+| Query strategy | **Superseded** — replaced by persistent chat history (Section 18) |
+| Recency weighting | **Yes** — filter to `turn >= current_turn - 5` in SQLite queries |
+
+---
+
+## 18. Architectural Decisions Log
+
+This section records all major architectural decisions made during development, with rationale.
+
+---
+
+### 18.1 LangGraph + Pydantic State (v1)
+
+**Decision:** Use LangGraph `StateGraph` with a `TypedDict` wrapper (`GraphState`) containing serialised Pydantic JSON.
+
+**Rationale:** LangGraph requires `TypedDict` for state. Pydantic provides validation at node boundaries. Serialising to JSON avoids LangGraph's reducer complexity.
+
+**Implementation:** `GlobalGameState.to_graph_state()` / `from_graph_state()` at every node boundary.
+
+---
+
+### 18.2 Repository Pattern for Vault Storage (v1)
+
+**Decision:** `AbstractVaultRepository` ABC with `ChromaVaultRepository` (production) and `InMemoryVaultRepository` (tests).
+
+**Rationale:** Swapping ChromaDB for any other vector store requires only implementing a new subclass — zero changes to the service layer.
+
+**Files:** [`db/base_repository.py`](../src/encrypted_vault/db/base_repository.py), [`db/chroma_repository.py`](../src/encrypted_vault/db/chroma_repository.py), [`db/in_memory_repository.py`](../src/encrypted_vault/db/in_memory_repository.py)
+
+---
+
+### 18.3 All Agents Get `submit_guess` (v2)
+
+**Decision:** All 4 agents (Infiltrator, Saboteur, Scholar, Enforcer) can submit guesses, not just Scholar and Enforcer.
+
+**Rationale:** Any agent that finds the key should be able to win. Restricting guessing to 2 agents made the game less competitive.
+
+---
+
+### 18.4 Agent Elimination After 3 Wrong Guesses (v2)
+
+**Decision:** An agent with 0 guesses remaining is `is_eliminated=True` and skipped in turn rotation.
+
+**Rationale:** Creates tension and strategic depth — agents must balance guessing early (to get feedback) vs. conserving guesses.
+
+**Win conditions (in priority order):**
+1. Correct guess → instant win
+2. Last agent not eliminated → win by survival
+3. Turn limit reached → closest agent (by `known_digits`) wins
+
+---
+
+### 18.5 Per-Turn Rate Limits (v3)
+
+**Decision:** Each agent is limited to 1 vault query, 1 guess, and (Saboteur) 1 obfuscation per turn.
+
+**Rationale:** Prevents agents from exhausting all guesses in one turn or querying the vault repeatedly. Forces strategic turn-by-turn play.
+
+**Implementation:** Closure-based counters in `GameGraphBuilder`, reset at the start of each agent's turn in `make_agent_node()`.
+
+---
+
+### 18.6 Random Turn Order, Fixed Per Game (v3)
+
+**Decision:** Turn order is shuffled once in `initialize_node()` using `random.shuffle()` and persisted in `GlobalGameState.turn_order`.
+
+**Rationale:** Prevents agents from always acting in the same order, which would give the first agent a systematic advantage.
+
+---
+
+### 18.7 Public Sharing of Guess Information (v3)
+
+**Decision:** After each wrong guess, the SYSTEM broadcasts which digit positions were correct/wrong to all agents.
+
+**Rationale:** Prevents information hoarding and makes the game more collaborative/social. Agents can verify each other's claims against public feedback.
+
+**Feature 2:** When an agent is eliminated, their confirmed correct digits are also shared publicly.
+
+---
+
+### 18.8 Auto-Guess Fallback (v3)
+
+**Decision:** If an agent's turn ends without submitting a guess (and they have guesses remaining), `agent_node` auto-submits their best known template.
+
+**Rationale:** Prevents agents from wasting turns without guessing, which caused the "only 2 guesses shown" bug. Ensures all 3 guesses are always used.
+
+---
+
+### 18.9 Episodic Memory Layer — SQLite (v4)
+
+**Decision:** Add `memory/` module with `AbstractAgentMemory` ABC, `SQLiteAgentMemory` (production), and `InMemoryAgentMemory` (tests). Injected via `ServiceContainer.memory`.
+
+**Rationale:** Agents needed a way to store and retrieve vault clues, social claims, and trust events without polluting the LLM context with all historical data.
+
+**Storage:** In-memory SQLite (`:memory:`), ephemeral per game session. No embeddings — keyword + recency retrieval.
+
+**Memory types:** `vault_clue`, `social_claim`, `trust_event`, `reasoning`
+
+**Files:** [`memory/base_memory.py`](../src/encrypted_vault/memory/base_memory.py), [`memory/sqlite_memory.py`](../src/encrypted_vault/memory/sqlite_memory.py), [`memory/in_memory_memory.py`](../src/encrypted_vault/memory/in_memory_memory.py), [`services/memory_service.py`](../src/encrypted_vault/services/memory_service.py)
+
+---
+
+### 18.10 Persistent Chat History — SQLite (v5, supersedes context-rebuilding)
+
+**Decision:** Replace `_build_context()` (full context rebuild each turn) with persistent per-agent chat history stored in SQLite. Each turn appends a compact delta message (~200 tokens) instead of rebuilding the full context (~2000 tokens).
+
+**Problem with context-rebuilding:** The LLM had no continuity of reasoning across turns. Each turn started fresh, causing agents to ignore confirmed digits and guess blindly.
+
+**Solution:** Each agent maintains a growing LangChain message list in SQLite (`agent_chat_history` table). `run_turn()` loads history, appends a delta `HumanMessage`, invokes the LLM, and saves the response back to SQLite.
+
+**Delta message contains only:**
+- Current turn number, guesses remaining, other agents' status
+- Confirmed digits (ground truth — always current)
+- Previous guesses + feedback
+- Last 5 public messages
+- Last 3 private messages
+- Action guidance
+
+**History truncation:** Last 10 turns kept (≈40 messages). System message always preserved as message[0].
+
+**Key methods:**
+- [`_build_delta_message()`](../src/encrypted_vault/agents/base_agent.py) — builds compact per-turn update
+- [`_history_dicts_to_lc_messages()`](../src/encrypted_vault/agents/base_agent.py) — deserialises SQLite rows to LangChain messages
+- [`SQLiteAgentMemory.store_message()`](../src/encrypted_vault/memory/sqlite_memory.py) — persists a message
+- [`SQLiteAgentMemory.load_history()`](../src/encrypted_vault/memory/sqlite_memory.py) — loads history with truncation
+
+**Reset:** `GameRunner.reset()` calls `memory_service.forget_all()` → `reset_all()` which clears both `agent_memories` and `agent_chat_history` tables.
+
+---
+
+### 18.11 Two-Layer Memory Design (final)
+
+| Layer | Storage | Content | Always shown? |
+|-------|---------|---------|--------------|
+| **Structured facts** | `AgentPrivateState` (Pydantic) | `known_digits`, `wrong_digits`, `guess_history`, `agent_trust`, `guesses_remaining` | ✅ Yes — injected into every delta message |
+| **Episodic memories** | SQLite `agent_memories` table | Vault clues, social claims, trust events, reasoning summaries | ❌ No — kept as audit log, no longer injected into context |
+| **Chat history** | SQLite `agent_chat_history` table | Full LangChain message history (system/human/ai/tool) | ✅ Yes — loaded and extended each turn |
+
+**`knowledge_base`** and **`social_notes`** in `AgentPrivateState` are kept as UI audit logs (visible in the spectator panel) but no longer drive the LLM context.
+
+---
+
+### 18.12 Test Coverage
+
+| Test file | Tests | What it covers |
+|-----------|-------|---------------|
+| `tests/test_db.py` | ~15 | `AbstractVaultRepository` implementations |
+| `tests/test_services.py` | ~20 | `VaultService`, `ChatService`, `GameService` |
+| `tests/test_state.py` | ~20 | `AgentPrivateState`, `GlobalGameState`, `ChatMessage` |
+| `tests/test_graph.py` | ~10 | LangGraph graph compilation and routing |
+| `tests/test_memory.py` | 27 | `SQLiteAgentMemory`, `InMemoryAgentMemory`, `MemoryService` |
+| **Total** | **92** | All passing |
