@@ -284,11 +284,24 @@ class BaseAgent(ABC):
                 lines.append(f"  {aid.display_name}: {ps.guesses_remaining} guess(es) remaining")
         lines.append("")
 
+        # ── CONFIRMED DIGITS — shown FIRST, most important information ────
+        if private_state.known_digits or private_state.wrong_digits:
+            lines.append("╔══════════════════════════════════════════════════════════════╗")
+            lines.append("║  CONFIRMED DIGIT FACTS — THESE ARE GROUND TRUTH FROM FEEDBACK ║")
+            lines.append("╚══════════════════════════════════════════════════════════════╝")
+            if private_state.known_digits:
+                for pos, digit in sorted(private_state.known_digits.items()):
+                    lines.append(f"  Position {pos+1}: MUST BE '{digit}' ✅ — DO NOT CHANGE THIS IN ANY FUTURE GUESS!")
+            if private_state.wrong_digits:
+                for pos, digits in sorted(private_state.wrong_digits.items()):
+                    lines.append(f"  Position {pos+1}: CANNOT BE {digits} ❌ — NEVER USE THESE AT THIS POSITION!")
+            lines.append("")
+
         # ── GUESS HISTORY — shown prominently to prevent repeats ──────────
         if private_state.guess_history:
             previous_codes = [e["guess"] for e in private_state.guess_history]
             lines.append("╔══════════════════════════════════════════════════════╗")
-            lines.append("║  ⚠️  YOUR PREVIOUS GUESSES — DO NOT REPEAT THESE!  ║")
+            lines.append("║  YOUR PREVIOUS GUESSES — DO NOT REPEAT THESE!       ║")
             lines.append("╚══════════════════════════════════════════════════════╝")
             for i, entry in enumerate(private_state.guess_history, 1):
                 feedback_str = " ".join(entry.get("feedback", []))
@@ -296,25 +309,20 @@ class BaseAgent(ABC):
                 lines.append(f"  Guess #{i}: '{entry['guess']}' → {feedback_str} ({correct}/4 correct)")
 
             lines.append("")
-            lines.append("  CRITICAL RULES FOR YOUR NEXT GUESS:")
-            lines.append(f"  ❌ NEVER submit any of these again: {previous_codes}")
-            lines.append("  ✅ Keep digits that were ✅ in previous guesses")
-            lines.append("  ❌ Change ALL digits that were ❌ in previous guesses")
-            lines.append("  → Your next guess MUST be different from all previous guesses!")
+            lines.append("  MANDATORY RULES FOR YOUR NEXT GUESS:")
+            lines.append(f"  - FORBIDDEN codes (never submit again): {previous_codes}")
+            if private_state.known_digits:
+                for pos, digit in sorted(private_state.known_digits.items()):
+                    lines.append(f"  - Position {pos+1} MUST stay '{digit}' (was ✅ in previous guess)")
+            if private_state.wrong_digits:
+                for pos, digits in sorted(private_state.wrong_digits.items()):
+                    lines.append(f"  - Position {pos+1} MUST change (was ❌ for {digits})")
             lines.append("")
-
-        # Known digits (confirmed correct from guess feedback)
-        if private_state.known_digits:
-            lines.append("=== ✅ CONFIRMED CORRECT DIGITS (keep these in your next guess!) ===")
+            # Build the mandatory next guess template
+            template = ["?", "?", "?", "?"]
             for pos, digit in sorted(private_state.known_digits.items()):
-                lines.append(f"  Position {pos+1}: digit IS '{digit}' ✅ — KEEP THIS!")
-            lines.append("")
-
-        # Wrong digits (confirmed wrong from guess feedback)
-        if private_state.wrong_digits:
-            lines.append("=== ❌ CONFIRMED WRONG DIGITS (do NOT use these at these positions!) ===")
-            for pos, digits in sorted(private_state.wrong_digits.items()):
-                lines.append(f"  Position {pos+1}: digit is NOT {digits} ❌ — CHANGE THIS!")
+                template[pos] = digit
+            lines.append(f"  YOUR NEXT GUESS TEMPLATE: {''.join(template)} (replace ? with your best digit for each unknown position)")
             lines.append("")
 
         # Public chat (last 10)
@@ -327,10 +335,14 @@ class BaseAgent(ABC):
             lines.append("  (no messages yet)")
         lines.append("")
 
-        # Private inbox
+        # Private inbox — show last 5 messages with instruction to ACT on them
         inbox = game_state.private_inboxes.get(self.agent_id)
         if inbox and inbox.messages:
-            lines.append("=== YOUR PRIVATE INBOX (IMPORTANT — READ AND RESPOND) ===")
+            lines.append("=== YOUR PRIVATE INBOX ===")
+            lines.append("  IMPORTANT: Read these messages and ACT on the information.")
+            lines.append("  If someone shared a digit → add it to your knowledge.")
+            lines.append("  If someone asked you a question → ANSWER IT with a specific digit value.")
+            lines.append("  Do NOT ask the same question twice. Do NOT repeat messages you already sent.")
             for msg in inbox.messages[-5:]:
                 lines.append(f"  From [{msg.sender}]: {msg.content}")
             lines.append("  → Respond to these messages using send_private_message!")

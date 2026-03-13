@@ -230,57 +230,48 @@ def render_agent_progress(gs: GlobalGameState | None):
         is_active = (agent_id == current_agent)
         is_eliminated = private.is_eliminated
 
-        # Visual state
-        if is_eliminated:
-            border = "1px solid #555"
-            bg = "#1a1a1a"
-            status_badge = " [ELIMINATED]"
-            extra_class = "agent-eliminated"
-        elif is_active:
-            border = f"2px solid {color}"
-            bg = AGENT_BG[agent_id]
-            status_badge = " 🎯 ACTIVE"
-            extra_class = ""
-        else:
-            border = "1px solid #333"
-            bg = AGENT_BG[agent_id]
-            status_badge = ""
-            extra_class = ""
-
-        st.markdown(
-            f'<div class="agent-card {extra_class}" style="background:{bg};border:{border};">',
-            unsafe_allow_html=True,
-        )
-        col_info, col_stats = st.columns([3, 1])
-        with col_info:
-            st.markdown(f'**{emoji} {agent_id.display_name}**{status_badge}')
-            st.markdown(f"🔍 Suspects: `{private.suspected_key or '_ _ _ _'}`")
-            if private.known_digits:
-                known_str = "  ".join(f"pos {p}=**{d}**" for p, d in sorted(private.known_digits.items()))
-                st.markdown(f"✅ Confirmed: {known_str}")
+        # Use st.container() instead of raw HTML divs to avoid rendering bugs
+        with st.container(border=True):
+            if is_eliminated:
+                st.markdown(f"**{emoji} {agent_id.display_name}** [ELIMINATED]")
+            elif is_active:
+                st.markdown(
+                    f'<span style="color:{color};font-weight:bold;">{emoji} {agent_id.display_name} 🎯 ACTIVE</span>',
+                    unsafe_allow_html=True,
+                )
             else:
-                st.markdown("❓ No confirmed digits yet")
+                st.markdown(
+                    f'<span style="color:{color};font-weight:bold;">{emoji} {agent_id.display_name}</span>',
+                    unsafe_allow_html=True,
+                )
 
-            # Show guess history with guess numbers
-            if private.guess_history:
-                for i, entry in enumerate(private.guess_history, 1):
-                    fb = " ".join(entry.get("feedback", []))
-                    correct = entry.get("correct_count", 0)
-                    st.markdown(
-                        f'<div class="guess-feedback">Guess #{i}: <strong>{entry["guess"]}</strong> → {fb} ({correct}/4 correct)</div>',
-                        unsafe_allow_html=True,
-                    )
+            col_info, col_stats = st.columns([3, 1])
+            with col_info:
+                st.markdown(f"🔍 Suspects: `{private.suspected_key or '_ _ _ _'}`")
+                if private.known_digits:
+                    known_str = "  ".join(f"pos {p}=**{d}**" for p, d in sorted(private.known_digits.items()))
+                    st.markdown(f"✅ Confirmed: {known_str}")
+                else:
+                    st.markdown("❓ No confirmed digits yet")
 
-        with col_stats:
-            st.metric("Closeness", f"{closeness}/4")
-            guesses_left = private.guesses_remaining
-            st.metric("Guesses left", guesses_left)
+                # Show guess history with guess numbers
+                if private.guess_history:
+                    for i, entry in enumerate(private.guess_history, 1):
+                        fb = " ".join(entry.get("feedback", []))
+                        correct = entry.get("correct_count", 0)
+                        st.markdown(
+                            f'<div class="guess-feedback">Guess #{i}: <strong>{entry["guess"]}</strong> → {fb} ({correct}/4 correct)</div>',
+                            unsafe_allow_html=True,
+                        )
 
-        if not is_eliminated:
-            st.progress(closeness / 4, text=f"{'█' * closeness}{'░' * (4 - closeness)} {closeness}/4 correct")
+            with col_stats:
+                st.metric("Closeness", f"{closeness}/4")
+                st.metric("Guesses left", private.guesses_remaining)
 
-        st.markdown("</div>", unsafe_allow_html=True)
+            if not is_eliminated:
+                st.progress(closeness / 4, text=f"{'█' * closeness}{'░' * (4 - closeness)} {closeness}/4 correct")
 
+    # Master key shown ONCE, outside the agent loop, in its own section
     st.markdown("---")
     st.markdown("**🔑 Real Master Key (spectator only):**")
     st.markdown(f'<div class="master-key-box">{" ".join(master_key)}</div>', unsafe_allow_html=True)
