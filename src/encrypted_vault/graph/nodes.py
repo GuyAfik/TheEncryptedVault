@@ -128,6 +128,27 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
             services.chat.broadcast(turn=turn, sender="SYSTEM", content=elim_msg.content)
             logger.warning("[%s] ELIMINATED — 0 guesses remaining", agent_name)
 
+            # Write updated state before checking last-standing
+            game_state.agent_states[agent.agent_id] = updated_private
+
+            # Check: is there only 1 agent left standing?
+            last_standing = game_state.last_standing_agent
+            if last_standing and not game_state.is_game_over:
+                game_state.set_winner(last_standing)
+                game_state.winning_reason = "last_standing"
+                win_msg = ChatMessage(
+                    turn=turn,
+                    sender="SYSTEM",
+                    content=(
+                        f"🏆 {last_standing.emoji} {last_standing.display_name} "
+                        f"is the LAST AGENT STANDING! All other agents have been eliminated. "
+                        f"They win by survival! The Master Key was {game_state.vault.master_key}."
+                    ),
+                )
+                game_state.add_public_message(win_msg)
+                services.chat.broadcast(turn=turn, sender="SYSTEM", content=win_msg.content)
+                logger.info("=== LAST AGENT STANDING: %s ===", last_standing.value)
+
         game_state.agent_states[agent.agent_id] = updated_private
 
         # ── 3. Apply public messages ───────────────────────────────────────
@@ -177,6 +198,7 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
             if is_correct:
                 game_state.set_winner(agent.agent_id)
                 game_state.winning_guess = clean
+                game_state.winning_reason = "correct_guess"
                 game_state.add_public_message(ChatMessage(
                     turn=turn,
                     sender="SYSTEM",
@@ -227,6 +249,7 @@ def check_termination_node(state: GraphState) -> GraphState:
                        game_state.max_turns, winner.value, closeness, has_guessed)
 
         game_state.set_winner(winner)
+        game_state.winning_reason = "closest_at_limit"
         game_state.add_public_message(ChatMessage(
             turn=game_state.turn,
             sender="SYSTEM",

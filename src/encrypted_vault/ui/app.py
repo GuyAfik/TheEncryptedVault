@@ -353,24 +353,31 @@ def render_game_over(gs: GlobalGameState):
     except Exception:
         title, bc, wid = "🏆 GAME OVER!", "#f39c12", None
 
-    # Build subtitle
-    if winning_guess:
-        subtitle = f"Winning guess: **{winning_guess}** ✅"
-    else:
-        # Closeness winner — show what guess would have won
+    # Build subtitle based on winning reason
+    winning_reason = gs.winning_reason
+    if winning_reason == "correct_guess" and winning_guess:
+        subtitle = f"Won by **correct guess**: `{winning_guess}` ✅"
+    elif winning_reason == "last_standing":
+        subtitle = (
+            f"Won by **survival** — all other agents were eliminated. "
+            f"The correct answer was **{master_key}**."
+        )
+    elif winning_reason == "closest_at_limit":
         if wid:
             private = gs.agent_states.get(wid)
             if private and private.guess_history:
                 best_entry = max(private.guess_history, key=lambda e: e.get("correct_count", 0))
                 subtitle = (
-                    f"Won by closeness (no correct guess). "
-                    f"Best guess: **{best_entry['guess']}** ({best_entry['correct_count']}/4 correct). "
+                    f"Won by **closeness** at turn limit. "
+                    f"Best guess: `{best_entry['guess']}` ({best_entry['correct_count']}/4 correct). "
                     f"The correct answer was **{master_key}**."
                 )
             else:
-                subtitle = f"Won by closeness. The correct answer was **{master_key}**."
+                subtitle = f"Won by closeness at turn limit. The correct answer was **{master_key}**."
         else:
             subtitle = f"The correct answer was **{master_key}**."
+    else:
+        subtitle = f"The correct answer was **{master_key}**."
 
     st.markdown(
         f'<div class="winner-banner" style="background:linear-gradient(135deg,{bc}55,#1a1a2e);border:2px solid {bc};">'

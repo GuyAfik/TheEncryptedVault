@@ -47,6 +47,9 @@ class GlobalGameState(BaseModel):
     winning_guess: str | None = None
     """The exact 4-digit guess that won the game (if won by correct guess)."""
 
+    winning_reason: str = ""
+    """Human-readable reason for winning: 'correct_guess', 'last_standing', 'closest_at_limit'."""
+
     # ── Shared environment ─────────────────────────────────────────────────
     vault: VaultState
 
@@ -94,6 +97,20 @@ class GlobalGameState(BaseModel):
     def all_agents_exhausted(self) -> bool:
         """True if every agent is eliminated (0 guesses remaining)."""
         return all(s.is_eliminated for s in self.agent_states.values())
+
+    @property
+    def active_agents(self) -> list[AgentID]:
+        """Return list of agents who are NOT eliminated."""
+        return [aid for aid, ps in self.agent_states.items() if not ps.is_eliminated]
+
+    @property
+    def last_standing_agent(self) -> AgentID | None:
+        """
+        If exactly 1 agent is not eliminated, return them — they win by survival.
+        Returns None if 0 or 2+ agents are still active.
+        """
+        active = self.active_agents
+        return active[0] if len(active) == 1 else None
 
     # ── Mutation helpers ───────────────────────────────────────────────────
 

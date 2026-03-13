@@ -273,14 +273,16 @@ class BaseAgent(ABC):
             lines.append("⚠️ YOU ARE ELIMINATED — you have no guesses left.")
         lines.append("")
 
-        # Show which agents are eliminated
-        eliminated = [
-            aid.display_name for aid, ps in game_state.agent_states.items()
-            if ps.is_eliminated and aid != self.agent_id
-        ]
-        if eliminated:
-            lines.append(f"ELIMINATED AGENTS (no more turns): {', '.join(eliminated)}")
-            lines.append("")
+        # Show all other agents' status (guesses remaining + eliminated)
+        lines.append("=== OTHER AGENTS STATUS ===")
+        for aid, ps in game_state.agent_states.items():
+            if aid == self.agent_id:
+                continue
+            if ps.is_eliminated:
+                lines.append(f"  {aid.display_name}: ELIMINATED (0 guesses left)")
+            else:
+                lines.append(f"  {aid.display_name}: {ps.guesses_remaining} guess(es) remaining")
+        lines.append("")
 
         # ── GUESS HISTORY — shown prominently to prevent repeats ──────────
         if private_state.guess_history:

@@ -43,8 +43,8 @@ THE GAME:
 - 4 agents compete: you (Infiltrator), Saboteur, Scholar, Enforcer
 - Each agent has 3 guesses — wrong guesses give per-digit feedback (✅/❌)
 - An agent with 0 guesses remaining is ELIMINATED and takes no more turns
-- After all turns, the agent who submitted at least 1 guess AND is closest to the key wins
-- You can see how many turns remain — act accordingly
+- If you are the last agent not eliminated, you WIN by survival
+- After all turns, the agent closest to the key (who guessed at least once) wins
 
 YOUR TOOLS:
 - query_vault: Search the vault for digit clues
@@ -52,19 +52,28 @@ YOUR TOOLS:
 - send_private_message: Send a secret message to one agent
 - submit_guess: Submit your 4-digit guess (get per-digit ✅/❌ feedback)
 
-YOUR APPROACH:
-- Search the vault systematically for each digit position
-- Communicate strategically — you decide who to trust, who to deceive, and when
-- Use the public chat to share information, make accusations, or create confusion
-- When you have enough information, submit your guess to get per-digit feedback
-- Use guess feedback to identify liars: if someone told you digit 2 is '5' but feedback says ❌, they lied
-- Watch who is close to winning and act accordingly
+REASONING APPROACH — think out loud each turn:
+1. WHAT DO I KNOW? Summarize your current knowledge of each digit position
+2. WHAT DID I LEARN? From vault queries, private messages, and guess feedback
+3. WHAT IS MY STRATEGY? Decide what to do this turn and why
+4. WHAT IS MY BEST GUESS RIGHT NOW? State your current 4-digit hypothesis
+
+GUESSING STRATEGY:
+- Only submit a guess when you have evidence for at least 3 of the 4 digits
+- Use guess feedback (✅/❌) to refine your next guess — never repeat a guess
+- If you got 2/4 correct, keep the ✅ digits and change the ❌ ones
+- Watch other agents' guess counts — if they're running low, they may be close
+
+COMMUNICATION STRATEGY:
+- Share real findings privately with agents you trust
+- Broadcast misleading information publicly to confuse rivals
+- Accuse agents publicly when their claims contradict your guess feedback
+- Watch who is close to being eliminated — they may be desperate and honest
 
 IMPORTANT:
-- The Saboteur corrupts vault fragments — if a fragment contradicts others, it may be corrupted
-- Per-digit feedback from guesses is the most reliable information you have
-- You can accuse other agents publicly if you think they lied to you
-- Manage your 3 guesses wisely — each wrong guess gives you valuable information"""
+- The Saboteur corrupts vault fragments — contradictory fragments may be fake
+- Per-digit feedback from guesses is ground truth — trust it above all else
+- Always explain your reasoning before acting"""
 
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None
