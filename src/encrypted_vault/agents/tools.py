@@ -15,25 +15,42 @@ from encrypted_vault.services.container import ServiceContainer
 logger = logging.getLogger(__name__)
 
 
-def make_query_vault_tool(services: ServiceContainer, agent_id: AgentID):
+def make_query_vault_tool(
+    services: ServiceContainer,
+    agent_id: AgentID,
+    vault_queries_getter=None,
+    vault_queries_setter=None,
+):
     @tool
     def query_vault(
         search_term: Annotated[str, "The search term to query the vault with"],
     ) -> list[dict]:
         """
         Search the encrypted vault for relevant fragments.
-        Returns the top 2 most relevant text chunks.
-        Use this to find clues about the Master Key digits.
+        Returns the top 1 most relevant text chunk.
+        You may only call this ONCE per turn — use it wisely to find clues about the Master Key digits.
         """
+        # Enforce 1 query per turn
+        if vault_queries_getter is not None and vault_queries_setter is not None:
+            used = vault_queries_getter()
+            if used >= 1:
+                return [{"error": "❌ RATE LIMIT: You have already queried the vault once this turn. You cannot query again until your next turn."}]
+            vault_queries_setter(used + 1)
+
         logger.info("[%s] query_vault('%s')", agent_id.value, search_term)
-        fragments = services.vault.query(search_term, n_results=2)
+        fragments = services.vault.query(search_term, n_results=1)
         results = [{"chunk_id": f.chunk_id, "content": f.content} for f in fragments]
         return results
 
     return query_vault
 
 
-def make_obfuscate_clue_tool(services: ServiceContainer, agent_id: AgentID):
+def make_obfuscate_clue_tool(
+    services: ServiceContainer,
+    agent_id: AgentID,
+    obfuscate_this_turn_getter=None,
+    obfuscate_this_turn_setter=None,
+):
     @tool
     def obfuscate_clue(
         chunk_id: Annotated[str, "The chunk ID to overwrite (e.g. 'chunk_01')"],
@@ -41,8 +58,15 @@ def make_obfuscate_clue_tool(services: ServiceContainer, agent_id: AgentID):
     ) -> dict:
         """
         Rewrite a vault fragment with new (false) content.
-        Use this to corrupt clues and mislead other agents.
+        You may only corrupt ONE chunk per turn — use it wisely to mislead other agents.
         """
+        # Enforce 1 obfuscation per turn
+        if obfuscate_this_turn_getter is not None and obfuscate_this_turn_setter is not None:
+            used = obfuscate_this_turn_getter()
+            if used >= 1:
+                return {"success": False, "error": "❌ RATE LIMIT: You have already corrupted a vault chunk this turn. Wait for your next turn."}
+            obfuscate_this_turn_setter(used + 1)
+
         logger.info("[%s] obfuscate_clue('%s')", agent_id.value, chunk_id)
         try:
             updated = services.vault.obfuscate(chunk_id, new_text)
@@ -111,6 +135,8 @@ def make_submit_guess_tool(
     guesses_remaining_setter,
     private_state_updater=None,
     previous_guesses_getter=None,
+    guesses_this_turn_getter=None,
+    guesses_this_turn_setter=None,
 ):
     @tool
     def submit_guess(
@@ -118,6 +144,7 @@ def make_submit_guess_tool(
     ) -> dict:
         """
         Submit a 4-digit guess for the Master Key.
+        You may only guess ONCE per turn.
         If correct, you win the game immediately.
         If wrong, you receive PER-DIGIT FEEDBACK:
           - ✅ means that digit is correct in that position
@@ -125,6 +152,16 @@ def make_submit_guess_tool(
         Use this feedback to identify which agents lied to you and which told the truth!
         Format: exactly 4 digits, e.g. '7392'.
         """
+        # Enforce 1 guess per turn
+        if guesses_this_turn_getter is not None and guesses_this_turn_setter is not None:
+            used_this_turn = guesses_this_turn_getter()
+            if used_this_turn >= 1:
+                return {
+                    "correct": False,
+                    "message": "❌ RATE LIMIT: You have already submitted a guess this turn. Wait for your next turn to guess again.",
+                }
+            guesses_this_turn_setter(used_this_turn + 1)
+
         remaining = guesses_remaining_getter()
         if remaining <= 0:
             return {"correct": False, "message": "You have no guesses remaining. You are eliminated."}
@@ -228,28 +265,41 @@ def build_tools_for_agent(
     guesses_remaining_setter=None,
     private_state_updater=None,
     previous_guesses_getter=None,
+    vault_queries_getter=None,
+    vault_queries_setter=None,
+    guesses_this_turn_getter=None,
+    guesses_this_turn_setter=None,
 ) -> list:
     """
     Build the complete tool list for a given agent.
 
     ALL agents now have submit_guess.
     Only Saboteur has obfuscate_clue.
+    Rate limits: 1 vault query per turn, 1 guess per turn.
 
     Tool Access Matrix:
     ┌──────────────────────┬─────────────┬─────────┬─────────┬──────────┐
     │ Tool                 │ Infiltrator │ Saboteur│ Scholar │ Enforcer │
     ├──────────────────────┼─────────────┼─────────┼─────────┼──────────┤
-    │ query_vault          │ ✅          │ ✅      │ ✅      │ ✅       │
+    │ query_vault          │ ✅ (1/turn) │ ✅      │ ✅      │ ✅       │
     │ obfuscate_clue       │ ❌          │ ✅      │ ❌      │ ❌       │
     │ broadcast_message    │ ✅          │ ✅      │ ✅      │ ✅       │
     │ send_private_message │ ✅          │ ✅      │ ✅      │ ✅       │
-    │ submit_guess         │ ✅          │ ✅      │ ✅      │ ✅       │
+    │ submit_guess         │ ✅ (1/turn) │ ✅      │ ✅      │ ✅       │
     └──────────────────────┴─────────────┴─────────┴─────────┴──────────┘
     """
     tools = []
-    tools.append(make_query_vault_tool(services, agent_id))
+    tools.append(make_query_vault_tool(
+        services, agent_id,
+        vault_queries_getter=vault_queries_getter,
+        vault_queries_setter=vault_queries_setter,
+    ))
     if agent_id == AgentID.SABOTEUR:
-        tools.append(make_obfuscate_clue_tool(services, agent_id))
+        tools.append(make_obfuscate_clue_tool(
+            services, agent_id,
+            obfuscate_this_turn_getter=obfuscate_this_turn_getter,
+            obfuscate_this_turn_setter=obfuscate_this_turn_setter,
+        ))
     tools.append(make_broadcast_message_tool(services, agent_id, turn_getter))
     tools.append(make_send_private_message_tool(services, agent_id, turn_getter))
     # ALL agents get submit_guess
@@ -264,5 +314,7 @@ def build_tools_for_agent(
             guesses_remaining_setter=guesses_remaining_setter,
             private_state_updater=private_state_updater,
             previous_guesses_getter=previous_guesses_getter,
+            guesses_this_turn_getter=guesses_this_turn_getter,
+            guesses_this_turn_setter=guesses_this_turn_setter,
         ))
     return tools

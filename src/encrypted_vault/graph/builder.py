@@ -1,6 +1,7 @@
 """GameGraphBuilder — constructs the LangGraph StateGraph for the game loop."""
 
 import functools
+import random
 
 from langgraph.graph import StateGraph, END
 
@@ -38,6 +39,10 @@ class GameGraphBuilder:
         # ── Shared mutable refs for tool callbacks ─────────────────────────
         _state_ref: dict = {"graph_state": None}
         _guesses: dict[AgentID, int] = {a: 3 for a in AgentID}
+        # Per-turn rate-limit counters (reset at the start of each agent's turn in agent_node)
+        _vault_queries_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
+        _guesses_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
+        _obfuscate_this_turn: int = 0  # Saboteur only
 
         def turn_getter() -> int:
             gs = _state_ref.get("graph_state")
@@ -66,9 +71,41 @@ class GameGraphBuilder:
                 _guesses[agent_id] = n
             return setter
 
+        def make_vault_queries_getter(agent_id: AgentID):
+            return lambda: _vault_queries_this_turn.get(agent_id, 0)
+
+        def make_vault_queries_setter(agent_id: AgentID):
+            def setter(n: int):
+                _vault_queries_this_turn[agent_id] = n
+            return setter
+
+        def make_guesses_this_turn_getter(agent_id: AgentID):
+            return lambda: _guesses_this_turn.get(agent_id, 0)
+
+        def make_guesses_this_turn_setter(agent_id: AgentID):
+            def setter(n: int):
+                _guesses_this_turn[agent_id] = n
+            return setter
+
+        def obfuscate_this_turn_getter() -> int:
+            return _obfuscate_this_turn
+
+        def obfuscate_this_turn_setter(n: int) -> None:
+            nonlocal _obfuscate_this_turn
+            _obfuscate_this_turn = n
+
+        # Expose reset functions so agent_node can call them at turn start
+        def reset_turn_counters(agent_id: AgentID) -> None:
+            """Reset per-turn rate-limit counters for the given agent."""
+            nonlocal _obfuscate_this_turn
+            _vault_queries_this_turn[agent_id] = 0
+            _guesses_this_turn[agent_id] = 0
+            if agent_id == AgentID.SABOTEUR:
+                _obfuscate_this_turn = 0
+
         # ── Instantiate all 4 agents (all get submit_guess) ────────────────
-        def make_agent(cls, agent_id: AgentID):
-            return cls(
+        def make_agent(cls, agent_id: AgentID, **extra_kwargs):
+            kwargs = dict(
                 llm=llm,
                 services=self._services,
                 turn_getter=turn_getter,
@@ -77,10 +114,18 @@ class GameGraphBuilder:
                 guesses_remaining_getter=make_guesses_getter(agent_id),
                 guesses_remaining_setter=make_guesses_setter(agent_id),
                 private_state_updater_factory=lambda agent: agent._make_private_state_updater(),
+                vault_queries_getter=make_vault_queries_getter(agent_id),
+                vault_queries_setter=make_vault_queries_setter(agent_id),
+                guesses_this_turn_getter=make_guesses_this_turn_getter(agent_id),
+                guesses_this_turn_setter=make_guesses_this_turn_setter(agent_id),
             )
+            kwargs.update(extra_kwargs)
+            return cls(**kwargs)
 
         infiltrator = make_agent(Infiltrator, AgentID.INFILTRATOR)
-        saboteur    = make_agent(Saboteur,    AgentID.SABOTEUR)
+        saboteur    = make_agent(Saboteur,    AgentID.SABOTEUR,
+                                 obfuscate_this_turn_getter=obfuscate_this_turn_getter,
+                                 obfuscate_this_turn_setter=obfuscate_this_turn_setter)
         scholar     = make_agent(Scholar,     AgentID.SCHOLAR)
         enforcer    = make_agent(Enforcer,    AgentID.ENFORCER)
 
@@ -108,7 +153,7 @@ class GameGraphBuilder:
             (AgentID.SCHOLAR,     scholar),
             (AgentID.ENFORCER,    enforcer),
         ]:
-            raw_node = make_agent_node(agent, self._services)
+            raw_node = make_agent_node(agent, self._services, reset_turn_counters)
             graph.add_node(
                 f"agent_{agent_id.value}",
                 wrap_with_state_sync(raw_node, agent_id),

@@ -42,6 +42,13 @@ class AgentPrivateState(BaseModel):
     """True if the agent has submitted at least 1 guess.
     Required to be eligible for the 'closest agent wins' tiebreaker."""
 
+    # ── Per-turn rate limits (reset at the start of each agent's turn) ────────
+    vault_queries_this_turn: int = 0
+    """Number of vault queries used this turn. Max 1 per turn."""
+
+    guesses_this_turn: int = 0
+    """Number of guesses submitted this turn. Max 1 per turn."""
+
     # ── Social intelligence ────────────────────────────────────────────────
 
     agent_trust: dict[str, str] = Field(default_factory=dict)

@@ -8,9 +8,12 @@ Key rules:
 - Winner must have submitted at least 1 guess (has_guessed=True) to win by closeness.
 - Turn counting: current_agent_index advances AFTER the agent acts.
 - Agents see turns_remaining in their context.
+- Turn order is randomized once at game start and fixed for the rest of the game.
+- Per-turn rate limits: 1 vault query, 1 guess, 1 obfuscation per turn.
 """
 
 import logging
+import random
 
 from encrypted_vault.state.enums import AgentID, GameStatus
 from encrypted_vault.state.game_state import GlobalGameState, GraphState
@@ -26,7 +29,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState:
-    """Build the initial GlobalGameState."""
+    """Build the initial GlobalGameState with a randomized turn order."""
     from encrypted_vault.config import settings
 
     logger.info("=== GAME INITIALIZING ===")
@@ -34,8 +37,16 @@ def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState
         max_turns=settings.max_turns,
         token_budget=settings.token_budget_per_agent,
     )
+
+    # Rule 2: Randomize turn order once at game start — fixed for the rest of the game
+    shuffled_order = list(game_state.turn_order)
+    random.shuffle(shuffled_order)
+    game_state.turn_order = shuffled_order
+    logger.info("Turn order randomized: %s", [a.value for a in shuffled_order])
+
     logger.info("Vault seeded with %d fragments.", len(game_state.vault.fragments))
 
+    order_str = " → ".join(a.display_name for a in shuffled_order)
     system_msg = ChatMessage(
         turn=0,
         sender="SYSTEM",
@@ -44,6 +55,7 @@ def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState
             f"The Master Key is hidden across {len(game_state.vault.fragments)} fragments. "
             f"All 4 agents have 3 guesses each. Wrong guesses give per-digit feedback (✅/❌). "
             f"An agent with 0 guesses is ELIMINATED. "
+            f"Turn order this game: {order_str}. "
             f"After {game_state.max_turns} turns, the agent closest to the key (who guessed at least once) wins!"
         ),
     )
@@ -58,7 +70,7 @@ def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState
 # make_agent_node factory
 # ---------------------------------------------------------------------------
 
-def make_agent_node(agent: BaseAgent, services: ServiceContainer):
+def make_agent_node(agent: BaseAgent, services: ServiceContainer, reset_turn_counters=None):
     """Factory: create a LangGraph node function for a specific agent."""
 
     def agent_node(state: GraphState) -> GraphState:
@@ -72,6 +84,10 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
             # Skip eliminated agents — advance turn and return
             game_state.advance_turn()
             return game_state.to_graph_state()
+
+        # Reset per-turn rate-limit counters at the start of this agent's turn
+        if reset_turn_counters is not None:
+            reset_turn_counters(agent.agent_id)
 
         turn = game_state.turn
         turns_remaining = game_state.max_turns - turn

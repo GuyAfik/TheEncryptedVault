@@ -26,6 +26,12 @@ class Saboteur(BaseAgent):
         guesses_remaining_getter=None,
         guesses_remaining_setter=None,
         private_state_updater_factory=None,
+        vault_queries_getter=None,
+        vault_queries_setter=None,
+        guesses_this_turn_getter=None,
+        guesses_this_turn_setter=None,
+        obfuscate_this_turn_getter=None,
+        obfuscate_this_turn_setter=None,
     ) -> None:
         self._turn_getter = turn_getter or (lambda: 0)
         self._master_key_getter = master_key_getter
@@ -33,6 +39,12 @@ class Saboteur(BaseAgent):
         self._guesses_remaining_getter = guesses_remaining_getter
         self._guesses_remaining_setter = guesses_remaining_setter
         self._private_state_updater_factory = private_state_updater_factory
+        self._vault_queries_getter = vault_queries_getter
+        self._vault_queries_setter = vault_queries_setter
+        self._guesses_this_turn_getter = guesses_this_turn_getter
+        self._guesses_this_turn_setter = guesses_this_turn_setter
+        self._obfuscate_this_turn_getter = obfuscate_this_turn_getter
+        self._obfuscate_this_turn_setter = obfuscate_this_turn_setter
         super().__init__(llm=llm, services=services, agent_id=AgentID.SABOTEUR)
 
     def _build_system_prompt(self) -> str:
@@ -96,4 +108,10 @@ IMPORTANT:
             guesses_remaining_setter=self._guesses_remaining_setter,
             private_state_updater=updater,
             previous_guesses_getter=self._make_previous_guesses_getter(),
+            vault_queries_getter=self._vault_queries_getter,
+            vault_queries_setter=self._vault_queries_setter,
+            guesses_this_turn_getter=self._guesses_this_turn_getter,
+            guesses_this_turn_setter=self._guesses_this_turn_setter,
+            obfuscate_this_turn_getter=self._obfuscate_this_turn_getter,
+            obfuscate_this_turn_setter=self._obfuscate_this_turn_setter,
         )
