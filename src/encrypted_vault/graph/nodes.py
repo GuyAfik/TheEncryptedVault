@@ -119,8 +119,8 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer):
                 turn=turn,
                 sender="SYSTEM",
                 content=(
-                    f"💀 {agent.agent_id.emoji} {agent.agent_id.display_name} "
-                    f"has used all 3 guesses and is ELIMINATED! "
+                    f"{agent.agent_id.emoji} {agent.agent_id.display_name} "
+                    f"has used all 3 guesses and is ELIMINATED (no more turns)! "
                     f"They will no longer take turns."
                 ),
             )
@@ -253,7 +253,7 @@ def check_termination_node(state: GraphState) -> GraphState:
             turn=game_state.turn,
             sender="SYSTEM",
             content=(
-                f"💀 All agents have been eliminated! "
+                f"All agents have been eliminated! "
                 f"{winner.emoji} {winner.display_name} wins by closeness ({closeness}/4 correct). "
                 f"The Master Key was {master_key}."
             ),

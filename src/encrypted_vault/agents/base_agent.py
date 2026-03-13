@@ -55,6 +55,14 @@ class BaseAgent(ABC):
     @abstractmethod
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]: ...
 
+    def _make_previous_guesses_getter(self):
+        """Returns a callable that returns the list of previously submitted guess codes."""
+        def getter() -> list[str]:
+            if self._current_private_state is None:
+                return []
+            return [e["guess"] for e in self._current_private_state.guess_history]
+        return getter
+
     def _make_private_state_updater(self):
         """
         Returns a callback that the submit_guess tool calls with per-digit feedback.
@@ -127,6 +135,13 @@ class BaseAgent(ABC):
                 thought_parts.append(response.content)
 
             if hasattr(response, "tool_calls") and response.tool_calls:
+                # Synthesize a thought if LLM went straight to tool calls without text
+                if not thought_parts:
+                    tool_names = [tc.get("name", "?") for tc in response.tool_calls]
+                    thought_parts.append(
+                        f"[Decided to call: {', '.join(tool_names)}]"
+                    )
+
                 tool_results = self._execute_tool_calls(response.tool_calls)
                 tool_calls_made.extend(tool_results)
 
@@ -158,7 +173,37 @@ class BaseAgent(ABC):
             thought_parts.append(f"[Error: {e}]")
 
         # Combine all reasoning into one thought entry for this turn
-        thought = "\n\n---\n\n".join(p for p in thought_parts if p)
+        # Also append a summary of tool calls made (always visible in thoughts)
+        if tool_calls_made:
+            tool_summary_parts = []
+            for call in tool_calls_made:
+                tool_name = call.get("tool", "?")
+                args = call.get("args", {})
+                result = call.get("result", {})
+                if tool_name == "query_vault":
+                    search = args.get("search_term", "?")
+                    count = len(result) if isinstance(result, list) else "?"
+                    tool_summary_parts.append(f"🔍 query_vault('{search}') → {count} results")
+                elif tool_name == "submit_guess":
+                    code = args.get("code", "?")
+                    correct = result.get("correct_count", "?") if isinstance(result, dict) else "?"
+                    tool_summary_parts.append(f"🎯 submit_guess('{code}') → {correct}/4 correct")
+                elif tool_name == "broadcast_message":
+                    content = args.get("content", "")[:60]
+                    tool_summary_parts.append(f"📢 broadcast: '{content}...'")
+                elif tool_name == "send_private_message":
+                    recip = args.get("recipient", "?")
+                    content = args.get("content", "")[:40]
+                    tool_summary_parts.append(f"🔒 DM → {recip}: '{content}...'")
+                elif tool_name == "obfuscate_clue":
+                    chunk = args.get("chunk_id", "?")
+                    tool_summary_parts.append(f"💣 obfuscate_clue('{chunk}')")
+            if tool_summary_parts:
+                thought_parts.append("Tools used:\n" + "\n".join(tool_summary_parts))
+
+        thought = "\n\n".join(p for p in thought_parts if p)
+        if not thought:
+            thought = "[No reasoning captured this turn]"
 
         # ── Extract side effects ───────────────────────────────────────────
         for call in tool_calls_made:
@@ -237,31 +282,37 @@ class BaseAgent(ABC):
             lines.append(f"ELIMINATED AGENTS (no more turns): {', '.join(eliminated)}")
             lines.append("")
 
-        # Guess history with per-digit feedback
+        # ── GUESS HISTORY — shown prominently to prevent repeats ──────────
         if private_state.guess_history:
-            lines.append("=== YOUR GUESS HISTORY (per-digit feedback) ===")
-            for entry in private_state.guess_history:
+            previous_codes = [e["guess"] for e in private_state.guess_history]
+            lines.append("╔══════════════════════════════════════════════════════╗")
+            lines.append("║  ⚠️  YOUR PREVIOUS GUESSES — DO NOT REPEAT THESE!  ║")
+            lines.append("╚══════════════════════════════════════════════════════╝")
+            for i, entry in enumerate(private_state.guess_history, 1):
                 feedback_str = " ".join(entry.get("feedback", []))
-                lines.append(
-                    f"  Guess '{entry['guess']}': {feedback_str} "
-                    f"({entry['correct_count']}/4 correct)"
-                )
-            lines.append("  → Use ✅ positions to confirm which agents told you the truth!")
-            lines.append("  → Use ❌ positions to identify which agents LIED to you!")
+                correct = entry.get("correct_count", 0)
+                lines.append(f"  Guess #{i}: '{entry['guess']}' → {feedback_str} ({correct}/4 correct)")
+
+            lines.append("")
+            lines.append("  CRITICAL RULES FOR YOUR NEXT GUESS:")
+            lines.append(f"  ❌ NEVER submit any of these again: {previous_codes}")
+            lines.append("  ✅ Keep digits that were ✅ in previous guesses")
+            lines.append("  ❌ Change ALL digits that were ❌ in previous guesses")
+            lines.append("  → Your next guess MUST be different from all previous guesses!")
             lines.append("")
 
         # Known digits (confirmed correct from guess feedback)
         if private_state.known_digits:
-            lines.append("=== CONFIRMED CORRECT DIGITS (from guess feedback) ===")
+            lines.append("=== ✅ CONFIRMED CORRECT DIGITS (keep these in your next guess!) ===")
             for pos, digit in sorted(private_state.known_digits.items()):
-                lines.append(f"  Position {pos} (digit {pos+1}): '{digit}' ✅ CONFIRMED CORRECT")
+                lines.append(f"  Position {pos+1}: digit IS '{digit}' ✅ — KEEP THIS!")
             lines.append("")
 
         # Wrong digits (confirmed wrong from guess feedback)
         if private_state.wrong_digits:
-            lines.append("=== CONFIRMED WRONG DIGITS (from guess feedback) ===")
+            lines.append("=== ❌ CONFIRMED WRONG DIGITS (do NOT use these at these positions!) ===")
             for pos, digits in sorted(private_state.wrong_digits.items()):
-                lines.append(f"  Position {pos} (digit {pos+1}): NOT {digits} ❌")
+                lines.append(f"  Position {pos+1}: digit is NOT {digits} ❌ — CHANGE THIS!")
             lines.append("")
 
         # Public chat (last 10)

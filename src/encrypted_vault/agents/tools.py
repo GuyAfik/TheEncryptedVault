@@ -110,6 +110,7 @@ def make_submit_guess_tool(
     guesses_remaining_getter,
     guesses_remaining_setter,
     private_state_updater=None,
+    previous_guesses_getter=None,
 ):
     @tool
     def submit_guess(
@@ -131,6 +132,20 @@ def make_submit_guess_tool(
         clean = "".join(c for c in code if c.isdigit())
         if len(clean) != 4:
             return {"correct": False, "message": f"Invalid code '{code}' — must be exactly 4 digits (1-9)."}
+
+        # Server-side duplicate guard — reject repeated guesses
+        if previous_guesses_getter is not None:
+            prev = previous_guesses_getter()
+            if clean in prev:
+                return {
+                    "correct": False,
+                    "message": (
+                        f"❌ REJECTED: You already submitted '{clean}' before! "
+                        f"Previous guesses: {prev}. "
+                        f"You MUST submit a different code. "
+                        f"Keep ✅ digits, change ❌ digits from your previous feedback."
+                    ),
+                }
 
         guesses_remaining_setter(remaining - 1)
         master_key = master_key_getter()
@@ -212,6 +227,7 @@ def build_tools_for_agent(
     guesses_remaining_getter=None,
     guesses_remaining_setter=None,
     private_state_updater=None,
+    previous_guesses_getter=None,
 ) -> list:
     """
     Build the complete tool list for a given agent.
@@ -247,5 +263,6 @@ def build_tools_for_agent(
             guesses_remaining_getter=guesses_remaining_getter,
             guesses_remaining_setter=guesses_remaining_setter,
             private_state_updater=private_state_updater,
+            previous_guesses_getter=previous_guesses_getter,
         ))
     return tools

@@ -234,7 +234,7 @@ def render_agent_progress(gs: GlobalGameState | None):
         if is_eliminated:
             border = "1px solid #555"
             bg = "#1a1a1a"
-            status_badge = " 💀 ELIMINATED"
+            status_badge = " [ELIMINATED]"
             extra_class = "agent-eliminated"
         elif is_active:
             border = f"2px solid {color}"
@@ -300,7 +300,7 @@ def render_thought_traces(gs: GlobalGameState | None):
         color = AGENT_COLORS[agent_id]
         n = len(private.thought_trace)
         is_eliminated = private.is_eliminated
-        elim_tag = " 💀" if is_eliminated else ""
+        elim_tag = " [Eliminated]" if is_eliminated else ""
 
         with st.expander(f"{emoji} {agent_id.display_name}{elim_tag} — {n} thoughts", expanded=False):
             if not private.thought_trace:
@@ -395,7 +395,7 @@ def render_game_over(gs: GlobalGameState):
         win_tag = " ✅ **WINNER**" if is_winner else ""
         guessed_tag = "" if has_guessed else " *(never guessed)*"
         private = gs.agent_states.get(aid)
-        elim_tag = " 💀" if (private and private.is_eliminated) else ""
+        elim_tag = " [Eliminated]" if (private and private.is_eliminated) else ""
         st.markdown(
             f"{medal} **{AGENT_EMOJIS[aid]} {aid.display_name}**{elim_tag} "
             f"— {closeness}/4 correct{guessed_tag}{win_tag}"

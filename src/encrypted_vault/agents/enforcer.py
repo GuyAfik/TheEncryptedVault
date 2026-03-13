@@ -79,4 +79,5 @@ IMPORTANT:
             guesses_remaining_getter=self._guesses_remaining_getter,
             guesses_remaining_setter=self._guesses_remaining_setter,
             private_state_updater=updater,
+            previous_guesses_getter=self._make_previous_guesses_getter(),
         )
