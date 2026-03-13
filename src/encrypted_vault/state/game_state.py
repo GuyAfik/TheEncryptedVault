@@ -50,6 +50,11 @@ class GlobalGameState(BaseModel):
     winning_reason: str = ""
     """Human-readable reason for winning: 'correct_guess', 'last_standing', 'closest_at_limit'."""
 
+    # ── Feature flags (set once at game start, immutable during play) ──────
+    broadcast_guess_results: bool = False
+    """When True, wrong guess digit positions are broadcast publicly after each guess.
+    When False, only the guessing agent sees their per-digit feedback (private mode)."""
+
     # ── Shared environment ─────────────────────────────────────────────────
     vault: VaultState
 

@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     max_turns: int = 20
     token_budget_per_agent: int = 8000
 
+    # Feature flags
+    broadcast_guess_results: bool = False
+    """When True, wrong guess digit positions are broadcast publicly after each guess.
+    When False, only the guessing agent sees their per-digit feedback (private mode)."""
+
     # ChromaDB
     chroma_persist_dir: str = "./chroma_db"
 

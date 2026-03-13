@@ -84,6 +84,7 @@ def init_session_state():
         "runner": None,
         "game_state": None,
         "game_started": False,
+        "broadcast_guess_results": False,
     }.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -135,7 +136,7 @@ def render_header(gs: GlobalGameState | None):
 
 
 def render_controls():
-    c1, c2 = st.columns([2, 2])
+    c1, c2, c3 = st.columns([2, 2, 3])
     with c1:
         if st.button("▶ Start Game", disabled=st.session_state.game_started,
                      type="primary", use_container_width=True):
@@ -144,6 +145,14 @@ def render_controls():
     with c2:
         if st.button("🔄 Restart", use_container_width=True):
             _restart_game()
+    with c3:
+        broadcast = st.toggle(
+            "📢 Broadcast guess results",
+            value=st.session_state.broadcast_guess_results,
+            disabled=st.session_state.game_started,
+            help="ON: Wrong guess digit positions are shared publicly with all agents.\nOFF: Only the guessing agent sees their per-digit feedback (private mode).",
+        )
+        st.session_state.broadcast_guess_results = broadcast
 
 
 def render_broadcast_chat(gs: GlobalGameState | None):
@@ -435,7 +444,8 @@ def _start_game():
     runner = GameRunner.create_production()
     st.session_state.runner = runner
     st.session_state.game_started = True
-    runner.start_threaded(delay_seconds=1.5)
+    broadcast = st.session_state.get("broadcast_guess_results", True)
+    runner.start_threaded(delay_seconds=1.5, broadcast_guess_results=broadcast)
 
 
 def _restart_game():

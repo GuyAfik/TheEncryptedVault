@@ -65,13 +65,17 @@ class GameRunner:
 
     # ── Game lifecycle ─────────────────────────────────────────────────────
 
-    def start(self) -> Generator[GlobalGameState, None, None]:
+    def start(self, broadcast_guess_results: bool = True) -> Generator[GlobalGameState, None, None]:
         """
         Run the game synchronously and yield GlobalGameState after each agent turn.
         Suitable for tests and direct iteration.
+
+        Args:
+            broadcast_guess_results: Feature flag — when False, wrong guess digit
+                positions are NOT broadcast publicly (private mode).
         """
         builder = GameGraphBuilder(services=self._services)
-        graph = builder.build()
+        graph = builder.build(broadcast_guess_results=broadcast_guess_results)
 
         initial_game_state = self._services.game.build_initial_state(
             max_turns=settings.max_turns,
@@ -91,17 +95,26 @@ class GameRunner:
                     logger.info("Game over — stopping stream")
                     break
 
-    def start_threaded(self, delay_seconds: float = 1.5) -> None:
+    def start_threaded(
+        self,
+        delay_seconds: float = 1.5,
+        broadcast_guess_results: bool = True,
+    ) -> None:
         """
         Run the game in a background daemon thread.
         States are pushed to _state_queue and also stored in _latest_state.
         The Streamlit UI reads _latest_state via get_latest_state().
+
+        Args:
+            delay_seconds: Pause between turns for UI readability.
+            broadcast_guess_results: Feature flag — when False, wrong guess digit
+                positions are NOT broadcast publicly (private mode).
         """
         self._stop_event.clear()
 
         def _run():
             try:
-                for state in self.start():
+                for state in self.start(broadcast_guess_results=broadcast_guess_results):
                     if self._stop_event.is_set():
                         break
                     # Store latest state (thread-safe)

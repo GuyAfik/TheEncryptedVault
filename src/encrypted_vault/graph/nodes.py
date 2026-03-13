@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 # initialize_node
 # ---------------------------------------------------------------------------
 
-def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState:
+def initialize_node(
+    state: GraphState,
+    services: ServiceContainer,
+    broadcast_guess_results: bool = True,
+) -> GraphState:
     """Build the initial GlobalGameState with a randomized turn order."""
     from encrypted_vault.config import settings
 
@@ -36,6 +40,7 @@ def initialize_node(state: GraphState, services: ServiceContainer) -> GraphState
     game_state = services.game.build_initial_state(
         max_turns=settings.max_turns,
         token_budget=settings.token_budget_per_agent,
+        broadcast_guess_results=broadcast_guess_results,
     )
 
     # Rule 2: Randomize turn order once at game start — fixed for the rest of the game
@@ -282,33 +287,37 @@ def make_agent_node(agent: BaseAgent, services: ServiceContainer, reset_turn_cou
             logger.info("[%s] Guess '%s' → correct=%s", agent_name, clean, is_correct)
 
             if not is_correct and len(clean) == 4:
-                # Feature 1: Share wrong digits publicly so all agents learn
-                master_key = game_state.vault.master_key
-                wrong_info_parts = []
-                correct_info_parts = []
-                for i, (guessed, actual) in enumerate(zip(clean, master_key)):
-                    if guessed != actual:
-                        wrong_info_parts.append(f"position {i+1} is NOT '{guessed}'")
-                    else:
-                        correct_info_parts.append(f"position {i+1} IS '{guessed}'")
+                # Feature 1: Share wrong digits publicly (only if broadcast_guess_results flag is on)
+                if game_state.broadcast_guess_results:
+                    master_key = game_state.vault.master_key
+                    wrong_info_parts = []
+                    correct_info_parts = []
+                    for i, (guessed, actual) in enumerate(zip(clean, master_key)):
+                        if guessed != actual:
+                            wrong_info_parts.append(f"position {i+1} is NOT '{guessed}'")
+                        else:
+                            correct_info_parts.append(f"position {i+1} IS '{guessed}'")
 
-                if wrong_info_parts or correct_info_parts:
-                    public_info = []
-                    if wrong_info_parts:
-                        public_info.append(f"WRONG digits: {', '.join(wrong_info_parts)}")
-                    if correct_info_parts:
-                        public_info.append(f"CORRECT digits: {', '.join(correct_info_parts)}")
-                    info_msg = ChatMessage(
-                        turn=turn,
-                        sender="SYSTEM",
-                        content=(
-                            f"📊 {agent.agent_id.display_name} guessed '{clean}' ({len(correct_info_parts)}/4 correct). "
-                            f"Public information: {'; '.join(public_info)}."
-                        ),
-                    )
-                    game_state.add_public_message(info_msg)
-                    services.chat.broadcast(turn=turn, sender="SYSTEM", content=info_msg.content)
-                    logger.info("[%s] Shared guess info publicly: %s", agent_name, info_msg.content[:100])
+                    if wrong_info_parts or correct_info_parts:
+                        public_info = []
+                        if wrong_info_parts:
+                            public_info.append(f"WRONG digits: {', '.join(wrong_info_parts)}")
+                        if correct_info_parts:
+                            public_info.append(f"CORRECT digits: {', '.join(correct_info_parts)}")
+                        info_msg = ChatMessage(
+                            turn=turn,
+                            sender="SYSTEM",
+                            content=(
+                                f"📊 {agent.agent_id.display_name} guessed '{clean}' ({len(correct_info_parts)}/4 correct). "
+                                f"Public information: {'; '.join(public_info)}."
+                            ),
+                        )
+                        game_state.add_public_message(info_msg)
+                        services.chat.broadcast(turn=turn, sender="SYSTEM", content=info_msg.content)
+                        logger.info("[%s] Shared guess info publicly: %s", agent_name, info_msg.content[:100])
+                else:
+                    # Private mode: only log, don't broadcast
+                    logger.info("[%s] Guess '%s' wrong — broadcast_guess_results=False, not sharing publicly", agent_name, clean)
 
             if is_correct:
                 game_state.set_winner(agent.agent_id)

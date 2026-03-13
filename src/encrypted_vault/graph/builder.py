@@ -32,7 +32,7 @@ class GameGraphBuilder:
     def __init__(self, services: ServiceContainer) -> None:
         self._services = services
 
-    def build(self):
+    def build(self, broadcast_guess_results: bool = True):
         """Build and compile the LangGraph StateGraph."""
         llm = LLMFactory.create_default()
 
@@ -144,7 +144,11 @@ class GameGraphBuilder:
 
         graph.add_node(
             "initialize",
-            functools.partial(initialize_node, services=self._services),
+            functools.partial(
+                initialize_node,
+                services=self._services,
+                broadcast_guess_results=broadcast_guess_results,
+            ),
         )
 
         for agent_id, agent in [
