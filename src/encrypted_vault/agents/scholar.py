@@ -34,7 +34,10 @@ class Scholar(BaseAgent):
         private_messages_sent_setter=None,
         peek_digit_getter=None,
         peek_digit_setter=None,
+        peeks_total_getter=None,
+        peeks_total_setter=None,
         private_state_peek_updater_factory=None,
+        corrupted_chunks_updater_factory=None,
         human_query_setter=None,
         human_query_answer_getter=None,
     ) -> None:
@@ -52,7 +55,10 @@ class Scholar(BaseAgent):
         self._private_messages_sent_setter = private_messages_sent_setter
         self._peek_digit_getter = peek_digit_getter
         self._peek_digit_setter = peek_digit_setter
+        self._peeks_total_getter = peeks_total_getter
+        self._peeks_total_setter = peeks_total_setter
         self._private_state_peek_updater_factory = private_state_peek_updater_factory
+        self._corrupted_chunks_updater_factory = corrupted_chunks_updater_factory
         self._human_query_setter = human_query_setter
         self._human_query_answer_getter = human_query_answer_getter
         super().__init__(llm=llm, services=services, agent_id=AgentID.SCHOLAR)
@@ -87,13 +93,18 @@ SOCIAL OBLIGATIONS — MANDATORY EVERY TURN:
 1. ALLY ACTION: Send a private message to your most trusted agent (Infiltrator is often honest).
    Share ONE confirmed digit and ask for one in return.
    Example: "I confirmed digit 1=7 from vault cross-reference. What do you have for digit 3?"
+   Example: "Do you think Saboteur is lying? My feedback contradicts what they told me about digit 2."
+   Example: "I think we should form an alliance — I'll share everything I know if you do the same."
 2. LOGIC SHARE: Send a private message to another agent sharing your deduction process.
    Example: "Vault says digit 2 is between 4-6. My feedback eliminated 5. So digit 2 is 4 or 6."
+   Example: "I cross-referenced 3 vault clues and I'm 90% sure digit 4=3. Can you confirm?"
 3. BROADCAST TRUTH OR EXPOSE: Post one public message.
    - If you caught a liar: "PROOF: My feedback shows digit 1 ≠ 5. Saboteur told me 5. SABOTEUR IS A LIAR!"
    - If no liar caught: Share a genuine deduction to build credibility.
+   - Respond to accusations: "Enforcer claims I lied — that's false. Here's my evidence: [feedback]"
 4. ALLIANCE OFFER (if you have 2+ confirmed digits): Propose a verified trade.
    Example: "I'll share my confirmed digit 3 if you share your confirmed digit 2. I don't lie."
+   Example: "Infiltrator, let's work together against Saboteur. They're corrupting the vault."
 
 REASONING — think out loud before acting:
 1. WHAT DO I KNOW? For each position: confirmed ✅, eliminated ❌, unknown ?
@@ -146,6 +157,8 @@ Per-digit feedback is GROUND TRUTH — it overrides everything else."""
             private_messages_sent_setter=self._private_messages_sent_setter,
             peek_digit_getter=self._peek_digit_getter,
             peek_digit_setter=self._peek_digit_setter,
+            peeks_total_getter=self._peeks_total_getter,
+            peeks_total_setter=self._peeks_total_setter,
             private_state_peek_updater=peek_updater,
             human_query_setter=self._human_query_setter,
             human_query_answer_getter=self._human_query_answer_getter,

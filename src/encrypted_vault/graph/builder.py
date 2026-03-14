@@ -45,6 +45,7 @@ class GameGraphBuilder:
         _guesses_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _private_messages_sent_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _peek_digit_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
+        _peeks_total: dict[AgentID, int] = {a: 0 for a in AgentID}
         _obfuscate_this_turn: int = 0  # Saboteur only
         # Human-in-the-loop state (shared across all agents)
         _pending_human_query: dict = {"agent_id": None, "position": None, "question": None, "turn": None}
@@ -107,6 +108,14 @@ class GameGraphBuilder:
         def make_peek_digit_setter(agent_id: AgentID):
             def setter(n: int):
                 _peek_digit_this_turn[agent_id] = n
+            return setter
+
+        def make_peeks_total_getter(agent_id: AgentID):
+            return lambda: _peeks_total.get(agent_id, 0)
+
+        def make_peeks_total_setter(agent_id: AgentID):
+            def setter(n: int):
+                _peeks_total[agent_id] = n
             return setter
 
         def obfuscate_this_turn_getter() -> int:
@@ -194,7 +203,10 @@ class GameGraphBuilder:
                 private_messages_sent_setter=make_private_messages_sent_setter(agent_id),
                 peek_digit_getter=make_peek_digit_getter(agent_id),
                 peek_digit_setter=make_peek_digit_setter(agent_id),
+                peeks_total_getter=make_peeks_total_getter(agent_id),
+                peeks_total_setter=make_peeks_total_setter(agent_id),
                 private_state_peek_updater_factory=lambda agent: agent._make_private_state_peek_updater(),
+                corrupted_chunks_updater_factory=lambda agent: agent._make_corrupted_chunks_updater(),
                 human_query_setter=human_query_setter,
                 human_query_answer_getter=human_query_answer_getter,
             )

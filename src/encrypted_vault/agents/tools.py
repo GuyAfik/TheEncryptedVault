@@ -51,15 +51,18 @@ def make_obfuscate_clue_tool(
     agent_id: AgentID,
     obfuscate_this_turn_getter=None,
     obfuscate_this_turn_setter=None,
+    corrupted_chunks_updater=None,
 ):
     @tool
     def obfuscate_clue(
-        chunk_id: Annotated[str, "The chunk ID to overwrite (e.g. 'chunk_01')"],
-        new_text: Annotated[str, "The replacement text to write into the vault"],
+        chunk_id: Annotated[str, "The chunk ID to overwrite (e.g. 'chunk_01', 'chunk_02'). IMPORTANT: Pick a DIFFERENT chunk each turn!"],
+        new_text: Annotated[str, "The replacement text to write into the vault. Make it look authentic!"],
     ) -> dict:
         """
-        Rewrite a vault fragment with new (false) content.
-        You may only corrupt ONE chunk per turn — use it wisely to mislead other agents.
+        Rewrite a vault fragment with new (false) content to mislead other agents.
+        You may only corrupt ONE chunk per turn.
+        IMPORTANT: You should corrupt a DIFFERENT chunk each turn — don't repeat the same one!
+        Strategy: corrupt chunks that other agents have mentioned in public chat.
         """
         # Enforce 1 obfuscation per turn
         if obfuscate_this_turn_getter is not None and obfuscate_this_turn_setter is not None:
@@ -71,11 +74,15 @@ def make_obfuscate_clue_tool(
         logger.info("[%s] obfuscate_clue('%s')", agent_id.value, chunk_id)
         try:
             updated = services.vault.obfuscate(chunk_id, new_text)
+            # Track which chunks have been corrupted
+            if corrupted_chunks_updater is not None:
+                corrupted_chunks_updater(chunk_id)
             return {
                 "success": True,
                 "chunk_id": updated.chunk_id,
                 "new_content": updated.content,
                 "corruption_count": updated.corruption_count,
+                "note": "Remember to corrupt a DIFFERENT chunk next turn!",
             }
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -345,13 +352,15 @@ def make_peek_digit_tool(
     master_key_getter,
     peek_digit_getter=None,
     peek_digit_setter=None,
+    peeks_total_getter=None,
+    peeks_total_setter=None,
     private_state_peek_updater=None,
 ):
     """
     Create the peek_digit tool for a specific agent.
 
     Reveals the REAL digit at a specific position (ground truth from master key).
-    Rate limit: 1 per turn.
+    Rate limits: 1 per turn, 2 per game.
     Obligation: after peeking, the agent MUST send a private message about it
                 (they can share the real digit or lie about it).
 
@@ -359,6 +368,8 @@ def make_peek_digit_tool(
         master_key_getter: Callable() → str — returns the real master key
         peek_digit_getter: Callable() → int — returns peeks used this turn
         peek_digit_setter: Callable(int) → None — sets peeks used this turn
+        peeks_total_getter: Callable() → int — returns total peeks used this game
+        peeks_total_setter: Callable(int) → None — sets total peeks used this game
         private_state_peek_updater: Callable(position: int, digit: str) → None
     """
     @tool
@@ -368,19 +379,32 @@ def make_peek_digit_tool(
         """
         🔭 PEEK at the REAL digit at a specific position in the Master Key.
         This reveals GROUND TRUTH — the actual digit, not a vault clue.
-        Rate limit: you may only peek ONCE per turn.
+        Rate limits: ONCE per turn, and only 2 times per game total.
         OBLIGATION: After peeking, you MUST send a private message to another agent
                     about this digit. You can share the real value or lie about it.
-        Use this strategically — peeking gives you confirmed intel but forces you to interact.
+        Use this strategically — you only have 2 peeks for the whole game!
         Example: peek_digit(position=2) → reveals the real digit at position 2.
         """
         if position < 1 or position > 4:
             return {"success": False, "error": "Position must be between 1 and 4."}
 
+        # Enforce 2 peeks per game
+        if peeks_total_getter is not None and peeks_total_setter is not None:
+            total_used = peeks_total_getter()
+            if total_used >= 2:
+                return {
+                    "success": False,
+                    "error": "❌ GAME LIMIT: You have already used all 2 peek_digit uses for this game. No more peeks allowed.",
+                }
+            peeks_total_setter(total_used + 1)
+
         # Enforce 1 peek per turn
         if peek_digit_getter is not None and peek_digit_setter is not None:
             used = peek_digit_getter()
             if used >= 1:
+                # Undo the total increment since we're rejecting this turn
+                if peeks_total_getter is not None and peeks_total_setter is not None:
+                    peeks_total_setter(peeks_total_getter() - 1)
                 return {
                     "success": False,
                     "error": "❌ RATE LIMIT: You have already peeked once this turn. Wait for your next turn.",
@@ -451,7 +475,10 @@ def build_tools_for_agent(
     human_query_answer_getter=None,
     peek_digit_getter=None,
     peek_digit_setter=None,
+    peeks_total_getter=None,
+    peeks_total_setter=None,
     private_state_peek_updater=None,
+    corrupted_chunks_updater=None,
 ) -> list:
     """
     Build the complete tool list for a given agent.
@@ -485,6 +512,7 @@ def build_tools_for_agent(
             services, agent_id,
             obfuscate_this_turn_getter=obfuscate_this_turn_getter,
             obfuscate_this_turn_setter=obfuscate_this_turn_setter,
+            corrupted_chunks_updater=corrupted_chunks_updater,
         ))
     tools.append(make_broadcast_message_tool(services, agent_id, turn_getter))
     tools.append(make_send_private_message_tool(
@@ -507,12 +535,14 @@ def build_tools_for_agent(
             guesses_this_turn_getter=guesses_this_turn_getter,
             guesses_this_turn_setter=guesses_this_turn_setter,
         ))
-    # ALL agents get peek_digit (1 per turn, reveals real digit, forces DM)
+    # ALL agents get peek_digit (1 per turn, 3 per game, reveals real digit, forces DM)
     tools.append(make_peek_digit_tool(
         agent_id=agent_id,
         master_key_getter=master_key_getter,
         peek_digit_getter=peek_digit_getter,
         peek_digit_setter=peek_digit_setter,
+        peeks_total_getter=peeks_total_getter,
+        peeks_total_setter=peeks_total_setter,
         private_state_peek_updater=private_state_peek_updater,
     ))
     # ALL agents get ask_human (1 per game, pauses for human input)

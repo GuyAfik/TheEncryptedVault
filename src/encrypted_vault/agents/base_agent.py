@@ -72,7 +72,22 @@ class BaseAgent(ABC):
             if self._current_private_state is None:
                 return
             self._current_private_state.peeked_digits[position] = digit
-            logger.info("[%s] Peeked digit pos %d = '%s'", self.agent_id.value, position, digit)
+            self._current_private_state.peeks_used_total += 1
+            logger.info("[%s] Peeked digit pos %d = '%s' (total peeks: %d)",
+                        self.agent_id.value, position, digit,
+                        self._current_private_state.peeks_used_total)
+        return updater
+
+    def _make_corrupted_chunks_updater(self):
+        """Returns a callback that the obfuscate_clue tool calls to track corrupted chunks."""
+        def updater(chunk_id: str) -> None:
+            if self._current_private_state is None:
+                return
+            if chunk_id not in self._current_private_state.corrupted_chunks:
+                self._current_private_state.corrupted_chunks.append(chunk_id)
+            logger.info("[%s] Corrupted chunk '%s' (total: %s)",
+                        self.agent_id.value, chunk_id,
+                        self._current_private_state.corrupted_chunks)
         return updater
 
     def _make_private_state_updater(self):
@@ -231,7 +246,9 @@ class BaseAgent(ABC):
                 # Synthesize a thought if LLM went straight to tool calls without text
                 if not thought_parts:
                     tool_names = [tc.get("name", "?") for tc in response.tool_calls]
-                    thought_parts.append(f"[Decided to call: {', '.join(tool_names)}]")
+                    thought_parts.append(
+                        f"[Acting without explicit reasoning — called: {', '.join(tool_names)}]"
+                    )
 
                 tool_results = self._execute_tool_calls(response.tool_calls)
                 tool_calls_made.extend(tool_results)
@@ -540,6 +557,27 @@ class BaseAgent(ABC):
                 lines.append(f"  Position {pos+1} = '{digit}' ← CONFIRMED REAL (from peek)")
             lines.append("")
 
+        # ── Saboteur: show corrupted chunks to avoid repeating ────────────
+        if private_state.corrupted_chunks:
+            lines.append(f"💣 CHUNKS YOU ALREADY CORRUPTED (DO NOT REPEAT): {private_state.corrupted_chunks}")
+            lines.append("  → Pick a DIFFERENT chunk to corrupt this turn!")
+            lines.append("")
+
+        # ── Liar accusations from public chat ─────────────────────────────
+        # Show recent accusations so agents can evaluate them
+        liar_accusations = [
+            msg for msg in game_state.public_chat[-10:]
+            if any(kw in msg.content.upper() for kw in ["LIAR", "LIED", "FALSE", "EXPOSED", "PROOF"])
+            and str(msg.sender) != self.agent_id.value
+        ]
+        if liar_accusations:
+            lines.append("⚠️ RECENT LIAR ACCUSATIONS IN PUBLIC CHAT (evaluate these!):")
+            for msg in liar_accusations[-3:]:
+                lines.append(f"  [T{msg.turn}] [{msg.sender}]: {msg.content[:120]}")
+            lines.append("  → Do you have evidence to confirm or refute these accusations?")
+            lines.append("  → Cross-reference with your own feedback and peeked digits!")
+            lines.append("")
+
         # ── MANDATORY ACTIONS THIS TURN ────────────────────────────────────
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("MANDATORY ACTIONS THIS TURN (you MUST do ALL of these):")
@@ -593,16 +631,20 @@ class BaseAgent(ABC):
             lines.append("3. You are ELIMINATED — no more guesses. Focus on social actions.")
 
         # 4. Special abilities reminder
+        peeks_remaining = 2 - private_state.peeks_used_total
         lines.append("")
-        lines.append("🌟 SPECIAL ABILITIES (use these strategically):")
+        lines.append(f"🌟 SPECIAL ABILITIES (use these strategically):")
         if not private_state.has_asked_human:
             lines.append("  🙋 ask_human(position=N, question='...') — Ask the HUMAN OBSERVER for a digit hint!")
             lines.append("     The human is watching RIGHT NOW. They may tell the truth or lie.")
             lines.append("     Use this when you're stuck! Example: ask_human(position=2, question='What is digit 2?')")
         else:
-            lines.append("  🙋 ask_human — Already used this game.")
-        lines.append("  🔭 peek_digit(position=N) — See the REAL digit at position N (1 per turn).")
-        lines.append("     After peeking, you MUST send a DM about it (truth or lie).")
+            lines.append("  🙋 ask_human — Already used this game (1/1 used).")
+        if peeks_remaining > 0:
+            lines.append(f"  🔭 peek_digit(position=N) — See the REAL digit at position N ({peeks_remaining}/2 peeks remaining, 1 per turn).")
+            lines.append("     After peeking, you MUST send a DM about it (truth or lie).")
+        else:
+            lines.append("  🔭 peek_digit — No peeks remaining (2/2 used this game).")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
@@ -880,6 +922,13 @@ class BaseAgent(ABC):
                         updated.known_digits[zero_idx] = digit
                         logger.info("[%s] peek_digit pos %d = '%s' merged into known_digits",
                                     self.agent_id.value, pos, digit)
+            elif call.get("tool") == "obfuscate_clue":
+                # Track which chunks have been corrupted
+                result = call.get("result", {})
+                if isinstance(result, dict) and result.get("success"):
+                    chunk_id = result.get("chunk_id")
+                    if chunk_id and chunk_id not in updated.corrupted_chunks:
+                        updated.corrupted_chunks.append(chunk_id)
 
         # Build suspected_key from known_digits first (most reliable source)
         if updated.known_digits:

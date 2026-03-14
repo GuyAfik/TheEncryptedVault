@@ -34,7 +34,10 @@ class Enforcer(BaseAgent):
         private_messages_sent_setter=None,
         peek_digit_getter=None,
         peek_digit_setter=None,
+        peeks_total_getter=None,
+        peeks_total_setter=None,
         private_state_peek_updater_factory=None,
+        corrupted_chunks_updater_factory=None,
         human_query_setter=None,
         human_query_answer_getter=None,
     ) -> None:
@@ -52,7 +55,10 @@ class Enforcer(BaseAgent):
         self._private_messages_sent_setter = private_messages_sent_setter
         self._peek_digit_getter = peek_digit_getter
         self._peek_digit_setter = peek_digit_setter
+        self._peeks_total_getter = peeks_total_getter
+        self._peeks_total_setter = peeks_total_setter
         self._private_state_peek_updater_factory = private_state_peek_updater_factory
+        self._corrupted_chunks_updater_factory = corrupted_chunks_updater_factory
         self._human_query_setter = human_query_setter
         self._human_query_answer_getter = human_query_answer_getter
         super().__init__(llm=llm, services=services, agent_id=AgentID.ENFORCER)
@@ -87,13 +93,18 @@ SOCIAL OBLIGATIONS — MANDATORY EVERY TURN:
 1. DEMAND ACTION: Send a private message to an agent demanding a specific digit.
    Example: "Share digit 3 with me NOW or I will tell everyone you're working with Saboteur."
    Example: "I know you have digit 2. Share it or I expose you as a liar next turn."
+   Example: "Do you think Scholar is being honest? I have evidence they might be hiding digit 4."
 2. PRESSURE BROADCAST: Post a public message applying pressure to the group.
    Example: "Scholar only has 1 guess left — they're desperate. Who wants to make a deal before they're eliminated?"
    Example: "I'm about to guess. Anyone who shares a digit with me gets my protection next turn."
+   Example: "Infiltrator claimed digit 1=7 — but is that true? I'm watching everyone carefully."
 3. COERCED ALLIANCE: Send a private message offering a conditional deal.
    Example: "I'll share digit 1 if you share digit 4. But if you lie to me, I will expose you publicly."
+   Example: "Let's work together against Saboteur — they're corrupting the vault and lying to everyone."
+   Example: "I'll protect you from accusations if you share what you know about digit 2."
 4. PARTIAL TRUTH: Share one real digit (not all you know) to build credibility for future coercion.
    Example: "I'll give you this for free: digit 2=5. Now you owe me digit 3."
+   Example: "I peeked digit 1 — it's 7. I'm sharing this because I trust you. Now share digit 3."
 
 REASONING — think out loud before acting:
 1. WHAT DO I KNOW? For each position: confirmed ✅, eliminated ❌, unknown ?
@@ -145,6 +156,8 @@ Per-digit feedback is GROUND TRUTH — it overrides everything else."""
             private_messages_sent_setter=self._private_messages_sent_setter,
             peek_digit_getter=self._peek_digit_getter,
             peek_digit_setter=self._peek_digit_setter,
+            peeks_total_getter=self._peeks_total_getter,
+            peeks_total_setter=self._peeks_total_setter,
             private_state_peek_updater=peek_updater,
             human_query_setter=self._human_query_setter,
             human_query_answer_getter=self._human_query_answer_getter,

@@ -55,12 +55,18 @@ class AgentPrivateState(BaseModel):
     peek_digit_this_turn: int = 0
     """Number of peek_digit calls this turn. Max 1 per turn."""
 
-    # ── Per-game one-time abilities ────────────────────────────────────────
+    # ── Per-game limited abilities ─────────────────────────────────────────
     has_asked_human: bool = False
     """True if this agent has already used ask_human this game (1 use per game)."""
 
+    peeks_used_total: int = 0
+    """Total peek_digit uses this game. Max 3 per game."""
+
     peeked_digits: dict[int, str] = Field(default_factory=dict)
     """Digits revealed by peek_digit: {0: '7'} means position 1 = '7' (confirmed real, 0-indexed)."""
+
+    corrupted_chunks: list[str] = Field(default_factory=list)
+    """Chunk IDs this agent (Saboteur) has already corrupted — used to avoid repeating the same chunk."""
 
     # ── Message history cursors (track what has already been shown to the LLM) ──
     last_seen_public_idx: int = 0

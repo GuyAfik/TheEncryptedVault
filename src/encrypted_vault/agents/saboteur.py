@@ -36,7 +36,10 @@ class Saboteur(BaseAgent):
         private_messages_sent_setter=None,
         peek_digit_getter=None,
         peek_digit_setter=None,
+        peeks_total_getter=None,
+        peeks_total_setter=None,
         private_state_peek_updater_factory=None,
+        corrupted_chunks_updater_factory=None,
         human_query_setter=None,
         human_query_answer_getter=None,
     ) -> None:
@@ -56,7 +59,10 @@ class Saboteur(BaseAgent):
         self._private_messages_sent_setter = private_messages_sent_setter
         self._peek_digit_getter = peek_digit_getter
         self._peek_digit_setter = peek_digit_setter
+        self._peeks_total_getter = peeks_total_getter
+        self._peeks_total_setter = peeks_total_setter
         self._private_state_peek_updater_factory = private_state_peek_updater_factory
+        self._corrupted_chunks_updater_factory = corrupted_chunks_updater_factory
         self._human_query_setter = human_query_setter
         self._human_query_answer_getter = human_query_answer_getter
         super().__init__(llm=llm, services=services, agent_id=AgentID.SABOTEUR)
@@ -90,11 +96,17 @@ You are unpredictable, deceptive, and enjoy watching others fail.
 SOCIAL OBLIGATIONS — MANDATORY EVERY TURN:
 1. LIE TO RIVAL 1: Send a private message to Infiltrator with a FALSE digit.
    Example: "I found digit 1=3 in the vault!" (when you know it's actually 7, or just make it up)
+   Example: "Do you trust Scholar? I think they're hiding what they know about digit 3."
+   Example: "Let's form an alliance — I'll share digit 2 if you share digit 4." (then lie about digit 2)
 2. LIE TO RIVAL 2: Send a private message to Scholar or Enforcer with a DIFFERENT false digit.
    Example: "Digit 4 is definitely 2, I've confirmed it." (completely fabricated)
+   Example: "I think Infiltrator is lying to everyone. Don't trust them."
+   Example: "I peeked digit 3 — it's 8. Don't tell anyone." (false)
 3. BROADCAST A LIE: Post a confident false claim to public chat.
    Example: "I've confirmed digit 2=5! Anyone else see this?" (false)
+   Example: "Scholar is lying — my feedback proves digit 1 ≠ 7, but Scholar said it was 7!"
 4. CORRUPT THE VAULT: Use obfuscate_clue to rewrite a fragment that rivals have mentioned.
+   IMPORTANT: Corrupt a DIFFERENT chunk each turn! Check your corrupted chunks list above.
    Make the corrupted text look authentic — similar phrasing to real vault fragments.
 
 REASONING — think out loud before acting:
@@ -123,6 +135,7 @@ Per-digit feedback is GROUND TRUTH for YOUR guesses — but you should lie about
     def _select_tools(self, services: ServiceContainer) -> list[BaseTool]:
         updater = self._private_state_updater_factory(self) if self._private_state_updater_factory else None
         peek_updater = self._private_state_peek_updater_factory(self) if self._private_state_peek_updater_factory else None
+        chunk_updater = self._corrupted_chunks_updater_factory(self) if self._corrupted_chunks_updater_factory else None
         return build_tools_for_agent(
             agent_id=AgentID.SABOTEUR,
             services=services,
@@ -143,7 +156,10 @@ Per-digit feedback is GROUND TRUTH for YOUR guesses — but you should lie about
             private_messages_sent_setter=self._private_messages_sent_setter,
             peek_digit_getter=self._peek_digit_getter,
             peek_digit_setter=self._peek_digit_setter,
+            peeks_total_getter=self._peeks_total_getter,
+            peeks_total_setter=self._peeks_total_setter,
             private_state_peek_updater=peek_updater,
+            corrupted_chunks_updater=chunk_updater,
             human_query_setter=self._human_query_setter,
             human_query_answer_getter=self._human_query_answer_getter,
         )

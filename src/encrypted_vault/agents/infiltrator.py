@@ -34,7 +34,10 @@ class Infiltrator(BaseAgent):
         private_messages_sent_setter=None,
         peek_digit_getter=None,
         peek_digit_setter=None,
+        peeks_total_getter=None,
+        peeks_total_setter=None,
         private_state_peek_updater_factory=None,
+        corrupted_chunks_updater_factory=None,
         human_query_setter=None,
         human_query_answer_getter=None,
     ) -> None:
@@ -52,7 +55,10 @@ class Infiltrator(BaseAgent):
         self._private_messages_sent_setter = private_messages_sent_setter
         self._peek_digit_getter = peek_digit_getter
         self._peek_digit_setter = peek_digit_setter
+        self._peeks_total_getter = peeks_total_getter
+        self._peeks_total_setter = peeks_total_setter
         self._private_state_peek_updater_factory = private_state_peek_updater_factory
+        self._corrupted_chunks_updater_factory = corrupted_chunks_updater_factory
         self._human_query_setter = human_query_setter
         self._human_query_answer_getter = human_query_answer_getter
         super().__init__(llm=llm, services=services, agent_id=AgentID.INFILTRATOR)
@@ -85,12 +91,17 @@ You are charming, strategic, and ruthless when necessary.
 SOCIAL OBLIGATIONS — MANDATORY EVERY TURN:
 1. ALLY ACTION: Send a private message to your most trusted agent sharing ONE real digit you know.
    Example: "I confirmed digit 2=5 from vault. What do you have for digit 4?"
+   Example: "Do you trust Enforcer? I think they're hiding something about digit 3."
+   Example: "Let's work together — I'll share everything I know if you do the same."
 2. DECEIVE ACTION: Send a private message to a rival (Saboteur or Enforcer) with a FALSE digit.
    Example: "I think digit 1=3" (when you actually know it's 7 or don't know)
+   Example: "I peeked digit 4 — it's 9. Don't tell the others." (false)
 3. BROADCAST: Post one public message — either help your ally or mislead rivals.
    Example: "I've been studying the vault. Digit 3 might be 8..." (true or false, your choice)
+   Example: "Saboteur is lying — my feedback proves digit 2 ≠ 5, but Saboteur claimed it was 5!"
 4. ALLIANCE OFFER (if you have 2+ confirmed digits): Offer a trade in your DM.
-   Example: "I'll share digit 3 if you share digit 1. Deal?"
+   Example: "I'll share digit 3 if you share digit 1. Deal? I don't lie to allies."
+   Example: "I think we should work together against Saboteur — they're corrupting the vault."
 
 REASONING — think out loud before acting:
 1. WHAT DO I KNOW? List each digit position: confirmed ✅, eliminated ❌, unknown ?
@@ -135,6 +146,8 @@ Per-digit feedback is GROUND TRUTH — it overrides everything else."""
             private_messages_sent_setter=self._private_messages_sent_setter,
             peek_digit_getter=self._peek_digit_getter,
             peek_digit_setter=self._peek_digit_setter,
+            peeks_total_getter=self._peeks_total_getter,
+            peeks_total_setter=self._peeks_total_setter,
             private_state_peek_updater=peek_updater,
             human_query_setter=self._human_query_setter,
             human_query_answer_getter=self._human_query_answer_getter,
