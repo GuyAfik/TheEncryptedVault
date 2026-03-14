@@ -32,6 +32,8 @@ class Saboteur(BaseAgent):
         guesses_this_turn_setter=None,
         obfuscate_this_turn_getter=None,
         obfuscate_this_turn_setter=None,
+        obfuscations_total_getter=None,
+        obfuscations_total_setter=None,
         private_messages_sent_getter=None,
         private_messages_sent_setter=None,
         peek_digit_getter=None,
@@ -55,6 +57,8 @@ class Saboteur(BaseAgent):
         self._guesses_this_turn_setter = guesses_this_turn_setter
         self._obfuscate_this_turn_getter = obfuscate_this_turn_getter
         self._obfuscate_this_turn_setter = obfuscate_this_turn_setter
+        self._obfuscations_total_getter = obfuscations_total_getter
+        self._obfuscations_total_setter = obfuscations_total_setter
         self._private_messages_sent_getter = private_messages_sent_getter
         self._private_messages_sent_setter = private_messages_sent_setter
         self._peek_digit_getter = peek_digit_getter
@@ -152,6 +156,8 @@ Per-digit feedback is GROUND TRUTH for YOUR guesses — but you should lie about
             guesses_this_turn_setter=self._guesses_this_turn_setter,
             obfuscate_this_turn_getter=self._obfuscate_this_turn_getter,
             obfuscate_this_turn_setter=self._obfuscate_this_turn_setter,
+            obfuscations_total_getter=self._obfuscations_total_getter,
+            obfuscations_total_setter=self._obfuscations_total_setter,
             private_messages_sent_getter=self._private_messages_sent_getter,
             private_messages_sent_setter=self._private_messages_sent_setter,
             peek_digit_getter=self._peek_digit_getter,

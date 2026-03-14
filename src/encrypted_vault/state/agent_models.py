@@ -42,6 +42,15 @@ class AgentPrivateState(BaseModel):
     """True if the agent has submitted at least 1 guess.
     Required to be eligible for the 'closest agent wins' tiebreaker."""
 
+    # ── Stagnation detection ───────────────────────────────────────────────
+    turns_without_progress: int = 0
+    """Number of consecutive turns where the agent gained no new confirmed digit.
+    When this reaches 3, the agent should guess to break the stagnation loop."""
+
+    confirmed_digits_count_last_turn: int = 0
+    """Number of confirmed digits at the end of the last turn.
+    Used to detect whether progress was made this turn."""
+
     # ── Per-turn rate limits (reset at the start of each agent's turn) ────────
     vault_queries_this_turn: int = 0
     """Number of vault queries used this turn. Max 1 per turn."""
@@ -60,7 +69,10 @@ class AgentPrivateState(BaseModel):
     """True if this agent has already used ask_human this game (1 use per game)."""
 
     peeks_used_total: int = 0
-    """Total peek_digit uses this game. Max 3 per game."""
+    """Total peek_digit uses this game. Max 2 per game."""
+
+    obfuscations_used_total: int = 0
+    """Total obfuscate_clue uses this game (Saboteur only). Max 3 per game."""
 
     peeked_digits: dict[int, str] = Field(default_factory=dict)
     """Digits revealed by peek_digit: {0: '7'} means position 1 = '7' (confirmed real, 0-indexed)."""

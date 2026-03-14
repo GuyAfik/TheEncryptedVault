@@ -143,7 +143,12 @@ def make_agent_node(
         )
         # Use the per-turn guess counter from the tool closure via result
         agent_already_guessed = result.guess_submitted is not None
-        has_enough_knowledge = len(updated_private.known_digits) >= 2
+        turns_remaining_for_guess = game_state.max_turns - turn
+        is_end_game = turns_remaining_for_guess <= 3 or updated_private.guesses_remaining <= 1
+        is_stagnating = updated_private.turns_without_progress >= 3
+        # Require 3 confirmed digits normally; 2 in end-game or when stagnating; never auto-guess with 0
+        min_digits_to_auto_guess = 2 if (is_end_game or is_stagnating) else 3
+        has_enough_knowledge = len(updated_private.known_digits) >= min_digits_to_auto_guess
 
         if (
             not agent_already_guessed

@@ -540,9 +540,31 @@ class BaseAgent(ABC):
         priv_start = private_state.last_seen_private_idx
         new_dms = inbox.messages[priv_start:] if inbox else []
         if new_dms:
-            lines.append(f"NEW PRIVATE MESSAGES ({len(new_dms)} new DM(s) since your last turn — ACT ON THESE!):")
+            lines.append(f"📬 NEW PRIVATE MESSAGES — YOU MUST RESPOND TO EACH ONE:")
             for msg in new_dms:
-                lines.append(f"  [T{msg.turn}] From [{msg.sender}]: {msg.content}")
+                sender_str = str(msg.sender)
+                content = msg.content
+                lines.append(f"  [T{msg.turn}] From [{sender_str}]: {content}")
+                # Classify the DM and give specific response guidance
+                content_upper = content.upper()
+                if any(kw in content_upper for kw in ["LIAR", "LIED", "LYING", "ACCUSED", "ACCUSE"]):
+                    lines.append(f"    → ⚠️ ACCUSATION: {sender_str} is accusing you or someone of lying!")
+                    lines.append(f"    → RESPOND: Defend yourself, counter-accuse, or admit it strategically.")
+                    lines.append(f"    → Example: 'That's false! My feedback proves I was right about digit X.'")
+                    lines.append(f"    → Or: 'You're right, I misread the vault. But I have new info now...'")
+                elif any(kw in content_upper for kw in ["ALLIANCE", "TOGETHER", "WORK WITH", "TRUST", "DEAL", "SHARE"]):
+                    lines.append(f"    → 🤝 ALLIANCE OFFER: {sender_str} wants to cooperate!")
+                    lines.append(f"    → RESPOND: Accept (and share real or false info), or decline with a reason.")
+                    lines.append(f"    → Example: 'Deal! I confirmed digit 2=5. What do you have for digit 3?'")
+                elif any(kw in content_upper for kw in ["DIGIT", "POSITION", "NUMBER", "WHAT IS", "WHAT DO"]):
+                    lines.append(f"    → 🔢 DIGIT REQUEST: {sender_str} is asking about a specific digit!")
+                    lines.append(f"    → RESPOND: Share the real digit (if ally) or a false one (if rival).")
+                    lines.append(f"    → Example: 'Digit 3 is 7, I confirmed it from the vault.'")
+                elif any(kw in content_upper for kw in ["UPSET", "ANGRY", "BETRAY", "BACKSTAB"]):
+                    lines.append(f"    → 😤 EMOTIONAL: {sender_str} is upset or feels betrayed!")
+                    lines.append(f"    → RESPOND: Apologize, justify, or double down depending on your strategy.")
+                else:
+                    lines.append(f"    → 💬 RESPOND to this message with relevant information or a reaction.")
             lines.append("")
 
         # Current suspected key
@@ -605,28 +627,50 @@ class BaseAgent(ABC):
         else:
             lines.append("2. 💬 BROADCAST: All other agents are eliminated — broadcast your findings.")
 
-        # 3. Guess guidance — §19.7: require 2+ confirmed digits
+        # 3. Guess guidance — stagnation-aware, with end-game exception
         guesses_left = private_state.guesses_remaining
         all_confirmed = {**private_state.known_digits, **private_state.peeked_digits}
         confirmed_count = len(all_confirmed)
+        turns_remaining_for_guess = game_state.max_turns - turn
+        is_end_game = turns_remaining_for_guess <= 3 or guesses_left <= 1
+        is_stagnating = private_state.turns_without_progress >= 3
         if guesses_left > 0:
-            if confirmed_count >= 2:
+            if confirmed_count >= 3:
                 template = ["?"] * 4
                 for pos, digit in all_confirmed.items():
                     template[pos] = digit
-                lines.append(f"3. 🎯 SUBMIT GUESS — you have {confirmed_count}/4 confirmed digits!")
+                lines.append(f"3. 🎯 SUBMIT GUESS — you have {confirmed_count}/4 confirmed digits! Strong position.")
                 lines.append(f"   Template: {''.join(template)} — fill '?' with your best estimate.")
                 lines.append("   NEVER change ✅ positions! NEVER use ❌ digits at their positions!")
+            elif confirmed_count >= 2 and (is_stagnating or is_end_game):
+                template = ["?"] * 4
+                for pos, digit in all_confirmed.items():
+                    template[pos] = digit
+                if is_stagnating:
+                    lines.append(f"3. 🔴 STAGNATION DETECTED — you've been stuck for {private_state.turns_without_progress} turns!")
+                    lines.append(f"   You have {confirmed_count}/4 confirmed digits. GUESS NOW to get feedback and break the loop!")
+                else:
+                    lines.append(f"3. 🎯 END-GAME GUESS — only {turns_remaining_for_guess} turns left or {guesses_left} guess(es) remaining.")
+                lines.append(f"   Template: {''.join(template)} — fill '?' with your best estimate.")
+                lines.append("   The feedback will tell you which unknown digits are right/wrong — use it!")
+                lines.append("   NEVER change ✅ positions! NEVER use ❌ digits at their positions!")
+            elif confirmed_count >= 2:
+                lines.append(f"3. ⚠️ HOLD OFF — you have {confirmed_count}/4 confirmed digits but ideally need 3.")
+                lines.append("   Use peek_digit on your most uncertain position to get a 3rd confirmed digit first.")
+                lines.append("   Exception: guess if you have strong intel from allies about the remaining positions.")
+            elif confirmed_count == 1 and is_stagnating:
+                lines.append(f"3. 🔴 STAGNATION — stuck for {private_state.turns_without_progress} turns with only {confirmed_count} confirmed digit.")
+                lines.append("   Use peek_digit NOW to get a 2nd confirmed digit, then guess next turn.")
+                if is_end_game:
+                    lines.append("   ⏰ END-GAME: Guess your best template immediately — no more time to wait!")
             elif confirmed_count == 1:
-                lines.append(f"3. ⚠️ HOLD OFF on guessing — you only have {confirmed_count}/4 confirmed digit.")
-                lines.append("   Use peek_digit or query vault to get more digits before guessing.")
-                lines.append("   Exception: if this is your last guess, submit your best template anyway.")
-            elif private_state.guess_history:
-                lines.append("3. ⚠️ HOLD OFF on guessing — you have 0 confirmed digits.")
-                lines.append("   Use peek_digit(position=N) to get ground truth, then guess.")
+                lines.append(f"3. ⚠️ HOLD OFF — you only have {confirmed_count}/4 confirmed digit. Need at least 2-3.")
+                lines.append("   Use peek_digit or gather intel from allies before guessing.")
             else:
-                lines.append("3. ⚠️ DO NOT GUESS YET — use peek_digit or query vault first.")
-                lines.append("   Guessing with 0 confirmed digits wastes your precious 3 guesses.")
+                lines.append("3. ⚠️ DO NOT GUESS YET — you have 0 confirmed digits.")
+                lines.append("   Use peek_digit(position=N) to get ground truth, then gather more intel.")
+                if is_end_game or is_stagnating:
+                    lines.append("   ⏰ Time is running out — guess your best estimate if needed!")
         else:
             lines.append("3. You are ELIMINATED — no more guesses. Focus on social actions.")
 
@@ -923,12 +967,13 @@ class BaseAgent(ABC):
                         logger.info("[%s] peek_digit pos %d = '%s' merged into known_digits",
                                     self.agent_id.value, pos, digit)
             elif call.get("tool") == "obfuscate_clue":
-                # Track which chunks have been corrupted
+                # Track which chunks have been corrupted + total count
                 result = call.get("result", {})
                 if isinstance(result, dict) and result.get("success"):
                     chunk_id = result.get("chunk_id")
                     if chunk_id and chunk_id not in updated.corrupted_chunks:
                         updated.corrupted_chunks.append(chunk_id)
+                    updated.obfuscations_used_total += 1
 
         # Build suspected_key from known_digits first (most reliable source)
         if updated.known_digits:
@@ -992,6 +1037,21 @@ class BaseAgent(ABC):
                                                     self.agent_id.value, sender_str, pos+1, digit)
                             except (ValueError, IndexError):
                                 pass
+
+        # ── Stagnation tracking ────────────────────────────────────────────
+        # Count total confirmed digits (from feedback + peeks)
+        current_confirmed = len(updated.known_digits)
+        if current_confirmed > updated.confirmed_digits_count_last_turn:
+            # Made progress — reset stagnation counter
+            updated.turns_without_progress = 0
+            logger.info("[%s] Progress made: %d → %d confirmed digits, stagnation reset",
+                        self.agent_id.value, updated.confirmed_digits_count_last_turn, current_confirmed)
+        else:
+            # No new confirmed digits this turn
+            updated.turns_without_progress += 1
+            logger.info("[%s] No progress this turn — stagnation counter: %d",
+                        self.agent_id.value, updated.turns_without_progress)
+        updated.confirmed_digits_count_last_turn = current_confirmed
 
         return updated
 

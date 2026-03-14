@@ -46,7 +46,8 @@ class GameGraphBuilder:
         _private_messages_sent_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _peek_digit_this_turn: dict[AgentID, int] = {a: 0 for a in AgentID}
         _peeks_total: dict[AgentID, int] = {a: 0 for a in AgentID}
-        _obfuscate_this_turn: int = 0  # Saboteur only
+        _obfuscate_this_turn: int = 0  # Saboteur only (per-turn)
+        _obfuscations_total: int = 0   # Saboteur only (per-game, max 3)
         # Human-in-the-loop state (shared across all agents)
         _pending_human_query: dict = {"agent_id": None, "position": None, "question": None, "turn": None}
         _human_query_answer: dict = {"value": None}
@@ -124,6 +125,13 @@ class GameGraphBuilder:
         def obfuscate_this_turn_setter(n: int) -> None:
             nonlocal _obfuscate_this_turn
             _obfuscate_this_turn = n
+
+        def obfuscations_total_getter() -> int:
+            return _obfuscations_total
+
+        def obfuscations_total_setter(n: int) -> None:
+            nonlocal _obfuscations_total
+            _obfuscations_total = n
 
         # Expose reset functions so agent_node can call them at turn start
         def reset_turn_counters(agent_id: AgentID) -> None:
@@ -216,7 +224,9 @@ class GameGraphBuilder:
         infiltrator = make_agent(Infiltrator, AgentID.INFILTRATOR)
         saboteur    = make_agent(Saboteur,    AgentID.SABOTEUR,
                                  obfuscate_this_turn_getter=obfuscate_this_turn_getter,
-                                 obfuscate_this_turn_setter=obfuscate_this_turn_setter)
+                                 obfuscate_this_turn_setter=obfuscate_this_turn_setter,
+                                 obfuscations_total_getter=obfuscations_total_getter,
+                                 obfuscations_total_setter=obfuscations_total_setter)
         scholar     = make_agent(Scholar,     AgentID.SCHOLAR)
         enforcer    = make_agent(Enforcer,    AgentID.ENFORCER)
 

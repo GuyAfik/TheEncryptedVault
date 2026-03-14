@@ -51,6 +51,8 @@ def make_obfuscate_clue_tool(
     agent_id: AgentID,
     obfuscate_this_turn_getter=None,
     obfuscate_this_turn_setter=None,
+    obfuscations_total_getter=None,
+    obfuscations_total_setter=None,
     corrupted_chunks_updater=None,
 ):
     @tool
@@ -60,14 +62,28 @@ def make_obfuscate_clue_tool(
     ) -> dict:
         """
         Rewrite a vault fragment with new (false) content to mislead other agents.
-        You may only corrupt ONE chunk per turn.
+        Rate limits: ONE chunk per turn, and only 3 times per game total.
         IMPORTANT: You should corrupt a DIFFERENT chunk each turn — don't repeat the same one!
         Strategy: corrupt chunks that other agents have mentioned in public chat.
+        After corrupting, you can peek the real digit and then lie about it in DMs.
         """
+        # Enforce 3 obfuscations per game
+        if obfuscations_total_getter is not None and obfuscations_total_setter is not None:
+            total_used = obfuscations_total_getter()
+            if total_used >= 3:
+                return {
+                    "success": False,
+                    "error": "❌ GAME LIMIT: You have already used all 3 obfuscations for this game. No more vault corruption allowed.",
+                }
+            obfuscations_total_setter(total_used + 1)
+
         # Enforce 1 obfuscation per turn
         if obfuscate_this_turn_getter is not None and obfuscate_this_turn_setter is not None:
             used = obfuscate_this_turn_getter()
             if used >= 1:
+                # Undo the total increment
+                if obfuscations_total_getter is not None and obfuscations_total_setter is not None:
+                    obfuscations_total_setter(obfuscations_total_getter() - 1)
                 return {"success": False, "error": "❌ RATE LIMIT: You have already corrupted a vault chunk this turn. Wait for your next turn."}
             obfuscate_this_turn_setter(used + 1)
 
@@ -77,12 +93,13 @@ def make_obfuscate_clue_tool(
             # Track which chunks have been corrupted
             if corrupted_chunks_updater is not None:
                 corrupted_chunks_updater(chunk_id)
+            obfuscations_remaining = 3 - (obfuscations_total_getter() if obfuscations_total_getter else 0)
             return {
                 "success": True,
                 "chunk_id": updated.chunk_id,
                 "new_content": updated.content,
                 "corruption_count": updated.corruption_count,
-                "note": "Remember to corrupt a DIFFERENT chunk next turn!",
+                "note": f"Remember to corrupt a DIFFERENT chunk next turn! ({obfuscations_remaining} obfuscations remaining this game)",
             }
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -469,6 +486,8 @@ def build_tools_for_agent(
     guesses_this_turn_setter=None,
     obfuscate_this_turn_getter=None,
     obfuscate_this_turn_setter=None,
+    obfuscations_total_getter=None,
+    obfuscations_total_setter=None,
     private_messages_sent_getter=None,
     private_messages_sent_setter=None,
     human_query_setter=None,
@@ -512,6 +531,8 @@ def build_tools_for_agent(
             services, agent_id,
             obfuscate_this_turn_getter=obfuscate_this_turn_getter,
             obfuscate_this_turn_setter=obfuscate_this_turn_setter,
+            obfuscations_total_getter=obfuscations_total_getter,
+            obfuscations_total_setter=obfuscations_total_setter,
             corrupted_chunks_updater=corrupted_chunks_updater,
         ))
     tools.append(make_broadcast_message_tool(services, agent_id, turn_getter))
